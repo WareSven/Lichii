@@ -39,6 +39,7 @@
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
+#include "video_core/renderer_vulkan/mesh_pipeline_key.h"
 #include "video_core/renderer_vulkan/pipeline_eviction_policy.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
@@ -790,6 +791,10 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         return nullptr;
     }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+    const bool is_mesh = maxwell3d->GetNativeMacroEngine().native_turing &&
+                         maxwell3d->regs.IsMeshEnabled() &&
+                         HasMeshShaderSlots(graphics_key.unique_hashes);
+    const ScopedMeshVertexInput mesh_vertex_input{graphics_key.state, is_mesh};
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
@@ -872,6 +877,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t skipped_pipelines = 0;
     size_t deferred_pipelines = 0;
     size_t queued_graphics = 0;
+    GraphicsPipelineLoadPlan graphics_load_plan;
+    std::unordered_set<u64> prebuild_keys;
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -952,13 +959,25 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             return;
         }
 
-        const u64 hash = key.Hash();
-        if (!disk_pipelines.insert(hash).second) {
+        const u64 old_hash = key.Hash();
+        if (envs.size() > Maxwell::MaxShaderProgram) {
             return;
         }
-        if (!PreloadAllPipelines() &&
-            (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
-                                    : !used_pipelines.contains(hash))) {
+        std::array<Shader::Stage, Maxwell::MaxShaderProgram> stages{};
+        std::ranges::transform(envs, stages.begin(), &FileEnvironment::ShaderStage);
+        NormalizeMeshVertexInput(key.state,
+                                 HasMeshShaderSlots(key.unique_hashes) &&
+                                     HasOnlyMeshStages(std::span{stages}.first(envs.size())));
+        const u64 hash = key.Hash();
+        MigrateUsedPipelineHash(used_pipelines, old_hash, hash);
+        const bool preload = PreloadAllPipelines() ||
+                             (used_pipelines.empty() ? queued_graphics < MaxPipelinesWithoutUsedList
+                                                     : used_pipelines.contains(hash));
+        const auto action = graphics_load_plan.Add(disk_pipelines, hash, preload);
+        if (action == GraphicsPipelineLoadAction::Duplicate) {
+            return;
+        }
+        if (action == GraphicsPipelineLoadAction::Defer) {
             ++skipped_pipelines;
             size_t capture_bytes = (envs.capacity() - envs.size()) * sizeof(FileEnvironment);
             for (const auto& env : envs) {
@@ -981,8 +1000,16 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                         return pipeline;
                     })) {
                 ++deferred_pipelines;
+                prebuild_keys.insert(hash);
             }
             return;
+        }
+        if (action == GraphicsPipelineLoadAction::Promote) {
+            --skipped_pipelines;
+            if (prebuild_keys.erase(hash) != 0) {
+                background_pipelines.Take(key);
+                --deferred_pipelines;
+            }
         }
         ++queued_graphics;
 

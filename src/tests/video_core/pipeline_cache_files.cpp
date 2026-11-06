@@ -10,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "video_core/pipeline_cache_files.h"
+#include "video_core/renderer_vulkan/mesh_pipeline_key.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/shader_environment.h"
 
@@ -183,6 +184,46 @@ TEST_CASE("Compatible pipeline cache migration retries after an interrupted temp
         old, current, Magic, 52, VideoCommon::VulkanPipelineCacheVersion));
     REQUIRE(ReadAll(current) == migrated);
     REQUIRE(ReadAll(old) == before);
+}
+
+TEST_CASE("Legacy v53 mesh keys normalize in memory without rewriting their cache",
+          "[video_core][pipeline_cache_files][mesh_pipeline_key]") {
+    TempDir temp;
+    const auto path = temp.path / "mesh-v53.bin";
+    SerializedEnvironment task{Shader::Stage::Task};
+    SerializedEnvironment mesh{Shader::Stage::Mesh};
+    SerializedEnvironment fragment{Shader::Stage::Fragment};
+    const std::array<const VideoCommon::GenericEnvironment*, 3> envs{&task, &mesh, &fragment};
+    Vulkan::GraphicsPipelineCacheKey key{};
+    key.unique_hashes = {0, 11, 0, 22, 0, 33};
+    key.state.dynamic_vertex_input.Assign(1);
+    key.state.attribute_types = 0x155;
+    const auto old_hash = key.Hash();
+    VideoCommon::SerializePipeline(key, envs, path, 53);
+    const auto before = ReadAll(path);
+    std::unordered_map<u64, u8> used{{old_hash, 3}};
+    size_t loaded = 0;
+    VideoCommon::LoadPipelines(
+        {}, path, 53,
+        [](std::ifstream&, VideoCommon::FileEnvironment) { FAIL("Unexpected compute record"); },
+        [&](std::ifstream& file, std::vector<VideoCommon::FileEnvironment> restored) {
+            Vulkan::GraphicsPipelineCacheKey cached;
+            file.read(reinterpret_cast<char*>(&cached), sizeof(cached));
+            REQUIRE(cached.Hash() == old_hash);
+            REQUIRE(restored.size() == 3);
+            const std::array stages{restored[0].ShaderStage(), restored[1].ShaderStage(),
+                                    restored[2].ShaderStage()};
+            Vulkan::NormalizeMeshVertexInput(cached.state,
+                                             Vulkan::HasMeshShaderSlots(cached.unique_hashes) &&
+                                                 Vulkan::HasOnlyMeshStages(stages));
+            Vulkan::MigrateUsedPipelineHash(used, old_hash, cached.Hash());
+            CHECK(cached.state.attribute_types == 0);
+            CHECK(used.at(cached.Hash()) == 3);
+            CHECK_FALSE(used.contains(old_hash));
+            ++loaded;
+        });
+    CHECK(loaded == 1);
+    CHECK(ReadAll(path) == before);
 }
 
 TEST_CASE("Truncated mesh state is rejected before a pipeline can be queued",

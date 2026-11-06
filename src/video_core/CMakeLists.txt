@@ -168,6 +168,7 @@ add_library(video_core STATIC
     renderer_vulkan/framebuffer_clear_layers.h
     renderer_vulkan/maxwell_to_vk.cpp
     renderer_vulkan/maxwell_to_vk.h
+    renderer_vulkan/mesh_pipeline_key.h
     renderer_vulkan/pipeline_build.h
     renderer_vulkan/pipeline_eviction_policy.h
     renderer_vulkan/pipeline_helper.h
