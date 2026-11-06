@@ -34,6 +34,23 @@
 
 namespace Core::Nx2Debug {
 
+namespace {
+std::atomic<bool> exclusive_read_release_early{};
+std::atomic<u64> exclusive_read_generation{};
+} // namespace
+
+const std::atomic<bool>* ExclusiveReadExperimentFlag() {
+#if defined(_M_X64) || defined(__x86_64__)
+    static const bool available = [] {
+        const char* value = std::getenv("EDEN_NX2_EXCLUSIVE_READ_EXPERIMENT");
+        return value && std::string_view{value} == "1";
+    }();
+    return available ? &exclusive_read_release_early : nullptr;
+#else
+    return nullptr;
+#endif
+}
+
 using nlohmann::json;
 using namespace std::chrono_literals;
 
@@ -176,6 +193,42 @@ void AppendPng(void* context, void* data, int size) {
     png.insert(png.end(), bytes, bytes + size);
 }
 
+json ExclusiveReadExperimentState() {
+    return {{"available", ExclusiveReadExperimentFlag() != nullptr},
+            {"enabled", exclusive_read_release_early.load(std::memory_order_acquire)},
+            {"generation", exclusive_read_generation.load(std::memory_order_acquire)},
+            {"scope", "A64 inline exclusive reads, 8/16/32/64 bits; 128 bits unchanged"}};
+}
+
+json ExclusiveReadExperiment(ToolState& state, const json& params) {
+    for (const auto& [key, value] : params.items()) {
+        if (key != "enabled") {
+            throw std::runtime_error{"expected only the optional boolean 'enabled'"};
+        }
+    }
+    if (params.contains("enabled")) {
+        if (!params.at("enabled").is_boolean()) {
+            throw std::runtime_error{"enabled must be a boolean"};
+        }
+        if (!ExclusiveReadExperimentFlag() || !state.system.IsPoweredOn() ||
+            !Settings::CurrentProgramIsSwitch2()) {
+            throw std::runtime_error{"CPU experiment requires its debug package and a running Switch 2 game"};
+        }
+        const bool enabled = params.at("enabled").get<bool>();
+        const bool previous = exclusive_read_release_early.exchange(enabled, std::memory_order_acq_rel);
+        if (enabled != previous) {
+            exclusive_read_generation.fetch_add(1, std::memory_order_release);
+            LOG_INFO(Core, "CPU exclusive-read experiment: {} (generation {})",
+                     enabled ? "early release" : "reference",
+                     exclusive_read_generation.load(std::memory_order_acquire));
+        }
+    }
+    auto result = ExclusiveReadExperimentState();
+    result["presents"] = g_nx2_present_count.load(std::memory_order_relaxed);
+    result["transition"] = "in-flight reads retain the mode sampled at entry";
+    return result;
+}
+
 json Status(ToolState& state, const json& params) {
     const auto window = std::chrono::milliseconds{Param<int>(params, "fps_window_ms", 500, 0, 5000)};
     const u64 before = g_nx2_present_count.load(std::memory_order_relaxed);
@@ -203,6 +256,7 @@ json Status(ToolState& state, const json& params) {
         {"dump_dir", state.dump_directory.generic_string()},
         {"log_filter", state.log_filter},
         {"rejected", HexList(VideoCore::Nx2Debug::RejectedHashes())},
+        {"cpu_exclusive_read_experiment", ExclusiveReadExperimentState()},
     };
 }
 
@@ -577,6 +631,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     };
     return {
         {"status", handler(Status)},
+        {"cpu_exclusive_read_experiment", handler(ExclusiveReadExperiment)},
         {"screenshot", handler(Screenshot)},
         {"log_tail", handler(LogTail)},
         {"log_filter", handler(LogFilter)},
@@ -810,6 +865,8 @@ Service::Service(System& system, std::string title, u64 program_id, const Endpoi
                  std::string dump_directory)
     : state{std::make_shared<ToolState>(system, std::move(title), program_id,
                                         std::move(dump_directory))} {
+    exclusive_read_release_early.store(false, std::memory_order_release);
+    exclusive_read_generation.store(0, std::memory_order_release);
     VideoCore::Nx2Debug::BeginSession();
     Common::Log::SetRingCapacity(RING_LINES);
     try {
@@ -826,6 +883,7 @@ Service::~Service() {
     state->stopping.store(true, std::memory_order_relaxed);
     VideoCore::Nx2Debug::EndSession();
     server.reset();
+    exclusive_read_release_early.store(false, std::memory_order_release);
 }
 
 std::unique_ptr<Service> MaybeStartService(System& system, std::string title, u64 program_id) {

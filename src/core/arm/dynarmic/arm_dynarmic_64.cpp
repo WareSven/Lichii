@@ -15,6 +15,7 @@
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
 #include "core/arm/dynarmic/window_trace.h"
 #include "core/core_timing.h"
+#include "core/debugger/nx2_debug_tools.h"
 #include "core/hle/kernel/k_process.h"
 #include "dynarmic/interface/A64/config.h"
 
@@ -337,6 +338,9 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     // Multi-process state
     config.processor_id = std::uint8_t(m_core_index);
     config.global_monitor = &m_exclusive_monitor.monitor;
+    if (Settings::CurrentProgramIsSwitch2()) {
+        config.exclusive_read_release_early = Nx2Debug::ExclusiveReadExperimentFlag();
+    }
 
     // System registers
     config.tpidrro_el0 = &m_cb->m_tpidrro_el0;

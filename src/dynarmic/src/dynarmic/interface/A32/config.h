@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -126,6 +127,9 @@ struct UserConfig {
     UserCallbacks* callbacks;
 
     ExclusiveMonitor* global_monitor = nullptr;
+
+    /// Experimental x64 exclusive-read timing switch; must outlive the JIT.
+    const std::atomic<bool>* exclusive_read_release_early = nullptr;
 
     // Page Table
     // The page table is used for faster memory access. If an entry in the table is nullptr,

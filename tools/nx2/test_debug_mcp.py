@@ -35,6 +35,8 @@ class FakeEmulator:
         method = request["method"]
         if method == "status":
             return {"result": {"title": "Test", "presents": 3}}
+        if method == "cpu_exclusive_read_experiment":
+            return {"result": {"available": True, "enabled": request["params"].get("enabled", False)}}
         if method == "screenshot":
             return {"result": {"width": 1280, "height": 720, "png_base64": PNG}}
         if method == "capture_frame":
@@ -85,6 +87,14 @@ class AdapterTest(unittest.TestCase):
                                      "params": {"name": name, "arguments": arguments or {}}})
         return reply["result"]
 
+    def test_exclusive_read_experiment_preserves_query_and_boolean_modes(self):
+        for params in ({}, {"enabled": True}, {"enabled": False}):
+            reply = self.call("cpu_exclusive_read_experiment", params)
+            self.assertFalse(reply.get("isError", False))
+            self.assertEqual(self.fake.requests[-1]["params"], params)
+            result = json.loads(reply["content"][0]["text"])
+            self.assertEqual(result["enabled"], params.get("enabled", False))
+
     def test_initialize_and_list(self):
         reply = self.adapter.handle({"jsonrpc": "2.0", "id": 0, "method": "initialize",
                                      "params": {"protocolVersion": "2025-03-26"}})
@@ -96,7 +106,7 @@ class AdapterTest(unittest.TestCase):
         self.assertIsNone(self.adapter.handle({"method": "notifications/initialized"}))
         names = [tool["name"] for tool in self.adapter.handle({"id": 2, "method": "tools/list"})
                  ["result"]["tools"]]
-        self.assertEqual(names, ["status", "screenshot", "log_tail", "log_filter", "capture_frame",
+        self.assertEqual(names, ["cpu_exclusive_read_experiment", "status", "screenshot", "log_tail", "log_filter", "capture_frame",
                                  "capture_image", "reject_shaders", "sample", "read_memory",
                                  "search_memory", "read_gpu_memory", "input",
                                  "input_sequence"])

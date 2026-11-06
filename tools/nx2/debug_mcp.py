@@ -30,6 +30,17 @@ STICK = {"type": "array", "items": {"type": "number", "minimum": -1, "maximum": 
 
 TOOLS = [
     {
+        "name": "cpu_exclusive_read_experiment",
+        "description": "Temporary debug-package A/B for scalar CPU exclusive-read lock scope. "
+                       "With no arguments reads the state; enabled selects early release. "
+                       "In-flight reads retain their entry mode; exclude transitions from timing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"enabled": {"type": "boolean"}},
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "status",
         "description": "Game title, program id, build, renderer, paused state, presented frame "
                        "count and fps (measured over fps_window_ms), dump directory, live log "

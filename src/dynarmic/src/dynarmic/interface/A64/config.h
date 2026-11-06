@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -142,6 +143,9 @@ struct UserConfig {
     UserCallbacks* callbacks;
 
     ExclusiveMonitor* global_monitor = nullptr;
+
+    /// Experimental x64 exclusive-read timing switch; must outlive the JIT.
+    const std::atomic<bool>* exclusive_read_release_early = nullptr;
 
     /// Pointer to where TPIDRRO_EL0 is stored. This pointer will be inserted into
     /// emitted code.

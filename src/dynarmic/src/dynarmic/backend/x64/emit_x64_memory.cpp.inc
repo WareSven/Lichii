@@ -367,6 +367,21 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
     code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
     code.mov(qword[tmp], vaddr);
 
+    const bool release_experiment = bitsize < 128 && conf.exclusive_read_release_early && !conf.HasOptimization(OptimizationFlag::Unsafe_IgnoreGlobalMonitor);
+    if (release_experiment) {
+        static_assert(sizeof(std::atomic<bool>) == 1 && std::atomic<bool>::is_always_lock_free);
+        // Capture once: a live toggle during the callback must not change which unlock runs.
+        code.mov(tmp, std::bit_cast<u64>(conf.exclusive_read_release_early));
+        code.movzx(tmp2.cvt32(), code.byte[tmp]);
+        code.mov(code.byte[code.ABI_JIT_PTR + offsetof(AxxJitState, exclusive_read_release_early)], tmp2.cvt8());
+        Xbyak::Label keep_locked;
+        code.test(tmp2.cvt8(), tmp2.cvt8());
+        code.jz(keep_locked);
+        // Publish the reservation before releasing; a concurrent STXR can only invalidate it.
+        EmitExclusiveUnlock(code, conf, tmp, tmp2.cvt32());
+        code.L(keep_locked);
+    }
+
     const auto fastmem_marker = ShouldFastmem(ctx, inst);
     if (fastmem_marker) {
         SharedLabel abort = ctx.GenSharedLabel(), end = ctx.GenSharedLabel();
@@ -394,7 +409,15 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
     code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
     EmitWriteMemoryMov<bitsize>(code, tmp, value_idx, false);
 
-    EmitExclusiveUnlock(code, conf, tmp, tmp2.cvt32());
+    if (release_experiment) {
+        Xbyak::Label already_unlocked;
+        code.cmp(code.byte[code.ABI_JIT_PTR + offsetof(AxxJitState, exclusive_read_release_early)], 0);
+        code.jnz(already_unlocked);
+        EmitExclusiveUnlock(code, conf, tmp, tmp2.cvt32());
+        code.L(already_unlocked);
+    } else {
+        EmitExclusiveUnlock(code, conf, tmp, tmp2.cvt32());
+    }
 
     if constexpr (bitsize == 128) {
         ctx.reg_alloc.DefineValue(code, inst, Xbyak::Xmm{value_idx});

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -29,6 +30,9 @@ namespace Core::Nx2Debug {
 class Server;
 struct Endpoint;
 struct ToolState;
+
+/// Temporary CPU experiment, enabled only by the dedicated debug package environment.
+[[nodiscard]] const std::atomic<bool>* ExclusiveReadExperimentFlag();
 
 /// The debug server of one boot (docs/nx2/debug-mcp.md): started when a game has loaded, stopped
 /// first when it shuts down, so the tools never see a half-built or half-destroyed system.

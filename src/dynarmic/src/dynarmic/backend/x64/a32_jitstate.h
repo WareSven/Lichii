@@ -52,6 +52,7 @@ struct A32JitState {
 
     // Exclusive state
     u32 exclusive_state = 0;
+    u8 exclusive_read_release_early = 0;
 
     u32 rsb_ptr = 0;
     std::array<u64, RSB_SIZE> rsb_location_descriptors;
