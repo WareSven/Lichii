@@ -9,6 +9,7 @@
 #include <mutex>
 #include <thread>
 #include <catch2/catch_test_macros.hpp>
+#include <windows.h>
 
 #include "common/common_types.h"
 #include "dynarmic/backend/x64/exclusive_monitor_friend.h"
@@ -28,6 +29,7 @@ struct Environment final : Dynarmic::A64::UserCallbacks {
     bool pause_before_load{};
     bool unexpected{};
     unsigned reads{};
+    unsigned writes{};
 
     Environment(std::array<std::atomic<u64>, 2>& memory_, unsigned size_, bool acquire_)
         : memory{memory_}, size{size_}, acquire{acquire_} {}
@@ -76,6 +78,7 @@ struct Environment final : Dynarmic::A64::UserCallbacks {
         unexpected = true;
     }
     bool Store(u64 address, u64 value, u64 expected) {
+        ++writes;
         return memory.at((address - DataAddress) / 8).compare_exchange_strong(expected, value);
     }
     bool MemoryWriteExclusive8(u64 a, u8 v, u8 e) override {
@@ -414,4 +417,82 @@ TEST_CASE("Exclusive read live toggles also preserve direct fastmem pairs",
     }
     REQUIRE(env.reads == 0);
     REQUIRE_FALSE(env.unexpected);
+}
+
+TEST_CASE("Exclusive read captures survive Windows fastmem protection faults",
+          "[dynarmic][exclusive_read_release]") {
+    struct Arena {
+        u8* data = static_cast<u8*>(
+            VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        ~Arena() {
+            if (data) {
+                DWORD ignored{};
+                VirtualProtect(data, 0x4000, PAGE_READWRITE, &ignored);
+                VirtualFree(data, 0, MEM_RELEASE);
+            }
+        }
+    };
+    for (const bool early : {false, true}) {
+        for (const bool recompile : {false, true}) {
+            CAPTURE(early, recompile);
+            Arena arena;
+            REQUIRE(arena.data != nullptr);
+            DWORD old_protection{};
+            REQUIRE(VirtualProtect(arena.data + DataAddress, 0x1000, PAGE_NOACCESS,
+                                   &old_protection) != 0);
+            REQUIRE(old_protection == PAGE_READWRITE);
+            std::array<std::atomic<u64>, 2> memory{7, 11};
+            Dynarmic::ExclusiveMonitor monitor{2};
+            std::atomic<bool> flag{early};
+            Environment env{memory, 8, false};
+            auto config = Config(env, monitor, &flag, arena.data);
+            config.fastmem_address_space_bits = 14;
+            config.recompile_on_exclusive_fastmem_failure = recompile;
+            Dynarmic::A64::Jit jit{config};
+            env.jit = &jit;
+            int callback_lock = -1;
+            env.on_read = [&] {
+                callback_lock = LockState(monitor);
+                flag.store(!early);
+            };
+            jit.SetPC(0);
+            jit.SetRegister(1, DataAddress);
+            const auto halt = jit.Step();
+            REQUIRE(Dynarmic::Has(halt, Dynarmic::HaltReason::Step));
+            REQUIRE_FALSE(Dynarmic::Has(halt, Dynarmic::HaltReason::CacheInvalidation));
+            REQUIRE(jit.GetPC() == 4);
+            REQUIRE(env.reads == 1);
+            REQUIRE(callback_lock == (early ? 0 : 1));
+            REQUIRE(jit.GetRegister(0) == 7);
+            REQUIRE(LockState(monitor) == 0);
+
+            REQUIRE(Store(jit) == 0);
+            REQUIRE(jit.GetPC() == 12);
+            REQUIRE(env.writes == 1);
+            REQUIRE(memory[0] == 9);
+            REQUIRE(LockState(monitor) == 0);
+
+            REQUIRE(VirtualProtect(arena.data + DataAddress, 0x1000, PAGE_READWRITE,
+                                   &old_protection) != 0);
+            REQUIRE(old_protection == PAGE_NOACCESS);
+            const u64 direct_value = 21;
+            std::memcpy(arena.data + DataAddress, &direct_value, sizeof(direct_value));
+            memory[0] = 7;
+            env.on_read = {};
+            Read(jit);
+            REQUIRE(jit.GetPC() == 4);
+            REQUIRE(jit.GetRegister(0) == (recompile ? 7 : direct_value));
+            REQUIRE(env.reads == (recompile ? 2 : 1));
+            REQUIRE(LockState(monitor) == 0);
+            REQUIRE(Store(jit) == 0);
+            REQUIRE(jit.GetPC() == 12);
+            REQUIRE(env.writes == (recompile ? 2 : 1));
+            REQUIRE(memory[0] == (recompile ? 9 : 7));
+            u64 direct_result{};
+            std::memcpy(&direct_result, arena.data + DataAddress, sizeof(direct_result));
+            REQUIRE(direct_result == (recompile ? direct_value : 9));
+            REQUIRE(LockState(monitor) == 0);
+            REQUIRE_FALSE(env.unexpected);
+        }
+    }
 }
