@@ -367,6 +367,12 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
     code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
     code.mov(qword[tmp], vaddr);
 
+    constexpr bool release_early = bitsize < 128 && std::is_same_v<AxxUserConfig, A64::UserConfig>;
+    if constexpr (release_early) {
+        // Publish before releasing so a concurrent exclusive store can invalidate this reservation.
+        EmitExclusiveUnlock(code, conf, tmp, tmp2.cvt32());
+    }
+
     const auto fastmem_marker = ShouldFastmem(ctx, inst);
     if (fastmem_marker) {
         SharedLabel abort = ctx.GenSharedLabel(), end = ctx.GenSharedLabel();
@@ -394,7 +400,9 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
     code.mov(tmp, std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
     EmitWriteMemoryMov<bitsize>(code, tmp, value_idx, false);
 
-    EmitExclusiveUnlock(code, conf, tmp, tmp2.cvt32());
+    if constexpr (!release_early) {
+        EmitExclusiveUnlock(code, conf, tmp, tmp2.cvt32());
+    }
 
     if constexpr (bitsize == 128) {
         ctx.reg_alloc.DefineValue(code, inst, Xbyak::Xmm{value_idx});

@@ -9,6 +9,7 @@
 #pragma once
 
 #include <bit>
+#include <type_traits>
 #include <utility>
 #include "dynarmic/backend/x64/xbyak.h"
 
