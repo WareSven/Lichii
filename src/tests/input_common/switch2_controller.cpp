@@ -171,8 +171,9 @@ TEST_CASE("Switch 2 rear buttons retain independent input and names after remapp
 
     VirtualGamepad second;
     second.Attach();
-    second.SetMapping("paddle1:b20,paddle2:b21,misc2:b22,");
-    const auto second_gr = CaptureButton(driver, mapping, second, 20);
+    // SDL shares mappings by GUID, while each controller keeps independent input state.
+    second.SetMapping("paddle1:b21,paddle2:b20,misc2:b22,");
+    const auto second_gr = CaptureButton(driver, mapping, second, 21);
     CHECK(second_gr.Get("guid", "") == saved_gl.Get("guid", ""));
     CHECK(second_gr.Get("port", -1) != saved_gl.Get("port", -1));
     CHECK(driver.GetUIName(second_gr) == Common::Input::ButtonNames::ButtonGR);
@@ -197,4 +198,5 @@ TEST_CASE("Switch 2 rear buttons retain independent input and names after remapp
 
     pad.Disconnect();
     CHECK(driver.GetUIName(saved_gl) == Common::Input::ButtonNames::Value);
+    CHECK(driver.GetUIName(second_gr) == Common::Input::ButtonNames::ButtonGR);
 }

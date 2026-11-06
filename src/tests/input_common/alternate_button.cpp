@@ -18,6 +18,10 @@ class ButtonEngine final : public InputCommon::InputEngine {
 public:
     explicit ButtonEngine(std::string name) : InputEngine(std::move(name)) {}
 
+    using InputEngine::SetAxis;
+    using InputEngine::SetButton;
+    using InputEngine::SetHatButton;
+
     u8 GetHatButtonId(const std::string& direction) const override {
         return direction == "up" ? 1 : 0;
     }
