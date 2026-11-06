@@ -252,6 +252,8 @@ public:
     }
 
     bool IsNativeMode() const { return native_mode; }
+    /// Whether the dispatch being run is a pass of a game DLSS evaluation (Fortune's Weave).
+    bool IsDlssDispatch() const { return native_mode && dlss_chain.active; }
     bool ProcessGameDlss(u64 program_id, u64 native_key);
     void TraceDlssContract(u64 native_key, bool warn_unvalidated = true);
 
