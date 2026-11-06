@@ -60,6 +60,9 @@ void EmitSpinLockLock(Xbyak::CodeGenerator& code, Xbyak::Reg64 ptr, Xbyak::Reg32
         code.pop(Xbyak::util::rax);
     } else {
         code.pause();
+        // Wait with reads until another acquisition attempt can succeed.
+        code.cmp(code.dword[ptr], 0);
+        code.jnz(loop, code.T_NEAR);
     }
     code.L(start);
     code.mov(tmp, 1);
