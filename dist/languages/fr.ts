@@ -3876,6 +3876,18 @@ Would you like to delete the old save data?</source>
 <context>
     <name>ConfigureInputPlayer</name>
     <message>
+        <source>Add alternate button</source>
+        <translation>Ajouter un bouton secondaire</translation>
+    </message>
+    <message>
+        <source>Change alternate button</source>
+        <translation>Changer le bouton secondaire</translation>
+    </message>
+    <message>
+        <source>Remove alternate button</source>
+        <translation>Supprimer le bouton secondaire</translation>
+    </message>
+    <message>
         <location filename="../../src/yuzu/configuration/configure_input_player.ui" line="14"/>
         <source>Configure Input</source>
         <translation>Configurer les touches</translation>

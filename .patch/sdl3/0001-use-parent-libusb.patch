@@ -26,7 +26,7 @@
 -              sdl_link_dependency(hidapi INCLUDES $<TARGET_PROPERTY:LibUSB::LibUSB,INTERFACE_INCLUDE_DIRECTORIES>)
 +      if(TARGET libusb::usb)
 +        set(HAVE_LIBUSB TRUE)
-+        sdl_link_dependency(hidapi LIBS libusb::usb)
++        sdl_link_dependency(hidapi LIBS "$<BUILD_LOCAL_INTERFACE:libusb::usb>")
 +      else()
 +        find_package(LibUSB)
 +        if(LibUSB_FOUND)

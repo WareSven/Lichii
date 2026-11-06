@@ -78,6 +78,12 @@ QString GetButtonName(Common::Input::ButtonNames button_name) {
         return QObject::tr("SR");
     case Common::Input::ButtonNames::TriggerSL:
         return QObject::tr("SL");
+    case Common::Input::ButtonNames::ButtonGL:
+        return QObject::tr("GL");
+    case Common::Input::ButtonNames::ButtonGR:
+        return QObject::tr("GR");
+    case Common::Input::ButtonNames::ButtonC:
+        return QObject::tr("C");
     case Common::Input::ButtonNames::ButtonStickL:
         return QObject::tr("Stick L");
     case Common::Input::ButtonNames::ButtonStickR:
@@ -181,6 +187,14 @@ void SetAnalogParam(const Common::ParamPackage& input_param, Common::ParamPackag
 QString ConfigureInputPlayer::ButtonToText(const Common::ParamPackage& param) {
     if (!param.Has("engine")) {
         return QObject::tr("[not set]");
+    }
+
+    if (param.Has("secondary")) {
+        auto primary = param;
+        primary.Erase("secondary");
+        Common::ParamPackage secondary{param.Get("secondary", "")};
+        secondary.Erase("secondary");
+        return QStringLiteral("%1 / %2").arg(ButtonToText(primary), ButtonToText(secondary));
     }
 
     const QString toggle = QString::fromStdString(param.Get("toggle", false) ? "~" : "");
@@ -374,7 +388,12 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
             HandleClick(
                 button, button_id,
                 [=, this](const Common::ParamPackage& params) {
-                    emulated_controller->SetButtonParam(button_id, params);
+                    auto replacement = params;
+                    const auto previous = emulated_controller->GetButtonParam(button_id);
+                    if (previous.Has("secondary")) {
+                        replacement.Set("secondary", previous.Get("secondary", ""));
+                    }
+                    emulated_controller->SetButtonParam(button_id, replacement);
                 },
                 InputCommon::Polling::InputType::Button);
         });
@@ -388,6 +407,29 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
                         emulated_controller->SetButtonParam(button_id, {});
                         button_map[button_id]->setText(tr("[not set]"));
                     });
+                    if (param.Has("code") || param.Has("button") || param.Has("hat") ||
+                        param.Has("axis")) {
+                        context_menu.addAction(
+                            param.Has("secondary") ? tr("Change alternate button")
+                                                   : tr("Add alternate button"),
+                            [=, this] {
+                                HandleClick(
+                                    button, button_id,
+                                    [=, this](const Common::ParamPackage& alternate) {
+                                        auto combined = emulated_controller->GetButtonParam(button_id);
+                                        combined.Set("secondary", alternate.Serialize());
+                                        emulated_controller->SetButtonParam(button_id, combined);
+                                    },
+                                    InputCommon::Polling::InputType::Button);
+                            });
+                    }
+                    if (param.Has("secondary")) {
+                        context_menu.addAction(tr("Remove alternate button"), [&] {
+                            param.Erase("secondary");
+                            emulated_controller->SetButtonParam(button_id, param);
+                            button_map[button_id]->setText(ButtonToText(param));
+                        });
+                    }
                     if (param.Has("code") || param.Has("button") || param.Has("hat")) {
                         context_menu.addAction(tr("Invert button"), [&] {
                             const bool invert_value = !param.Get("inverted", false);

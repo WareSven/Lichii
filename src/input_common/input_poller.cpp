@@ -1,8 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
+#include <mutex>
+
 #include "common/common_types.h"
 #include "common/input.h"
+#include "hid_core/frontend/input_converter.h"
 
 #include "input_common/input_engine.h"
 #include "input_common/input_poller.h"
@@ -12,6 +17,81 @@ namespace InputCommon {
 class DummyInput final : public Common::Input::InputDevice {
 public:
     explicit DummyInput() = default;
+};
+
+class InputFromButtons final : public Common::Input::InputDevice {
+public:
+    InputFromButtons(std::unique_ptr<Common::Input::InputDevice> primary,
+                     std::unique_ptr<Common::Input::InputDevice> secondary, bool toggle_,
+                     bool turbo_, bool analog_)
+        : toggle{toggle_}, turbo{turbo_}, analog{analog_},
+          devices{std::move(primary), std::move(secondary)} {
+        for (std::size_t i = 0; i < devices.size(); ++i) {
+            devices[i]->SetCallback({[this, i](const Common::Input::CallbackStatus& status) {
+                std::scoped_lock lock{mutex};
+                pressed[i] = Core::HID::TransformToButton(status).value;
+                if (status.type == Common::Input::InputType::Analog ||
+                    status.type == Common::Input::InputType::Trigger) {
+                    pressures[i] = Core::HID::TransformToTrigger(status).analog.value;
+                } else {
+                    pressures[i] = pressed[i] ? 1.0f : 0.0f;
+                }
+                if (!updating) {
+                    Update(false);
+                }
+            }});
+        }
+        ForceUpdate();
+    }
+
+    void ForceUpdate() override {
+        {
+            std::scoped_lock lock{mutex};
+            updating = true;
+        }
+        for (const auto& device : devices) {
+            device->ForceUpdate();
+        }
+        std::scoped_lock lock{mutex};
+        updating = false;
+        Update(true);
+    }
+
+private:
+    void Update(bool force) {
+        const bool value = pressed[0] || pressed[1];
+        const float pressure = std::max(pressures[0], pressures[1]);
+        if (!force && value == last_value && (!analog || pressure == last_pressure)) {
+            return;
+        }
+        last_value = value;
+        last_pressure = pressure;
+        const Common::Input::ButtonStatus button_status{
+            .value = value, .toggle = toggle, .turbo = turbo};
+        if (analog) {
+            TriggerOnChange({
+                .type = Common::Input::InputType::Trigger,
+                .trigger_status = {.analog = {.raw_value = pressure}, .pressed = button_status},
+            });
+        } else {
+            TriggerOnChange({
+                .type = Common::Input::InputType::Button,
+                .button_status = button_status,
+            });
+        }
+    }
+
+    std::mutex mutex;
+    std::array<bool, 2> pressed{};
+    std::array<float, 2> pressures{};
+    bool last_value{};
+    float last_pressure{};
+    bool updating{};
+    const bool toggle;
+    const bool turbo;
+    const bool analog;
+    // Unregister child callbacks before destroying the state they access.
+    std::array<std::unique_ptr<Common::Input::InputDevice>, 2> devices;
 };
 
 class InputFromButton final : public Common::Input::InputDevice {
@@ -372,6 +452,16 @@ public:
         };
     }
 
+    void ForceUpdate() override {
+        const auto status = GetStatus();
+        last_axis_value = status.analog.raw_value;
+        last_button_value = status.pressed.value;
+        TriggerOnChange({
+            .type = Common::Input::InputType::Trigger,
+            .trigger_status = status,
+        });
+    }
+
     void OnChange() {
         const Common::Input::CallbackStatus status{
             .type = Common::Input::InputType::Trigger,
@@ -427,6 +517,15 @@ public:
             .raw_value = input_engine->GetAxis(identifier, axis),
             .properties = properties,
         };
+    }
+
+    void ForceUpdate() override {
+        const auto status = GetStatus();
+        last_axis_value = status.raw_value;
+        TriggerOnChange({
+            .type = Common::Input::InputType::Analog,
+            .analog_status = status,
+        });
     }
 
     void OnChange() {
@@ -1142,6 +1241,25 @@ InputFactory::InputFactory(std::shared_ptr<InputEngine> input_engine_)
 
 std::unique_ptr<Common::Input::InputDevice> InputFactory::Create(
     const Common::ParamPackage& params) {
+    if (params.Has("secondary")) {
+        auto primary = params;
+        primary.Erase("secondary");
+        Common::ParamPackage secondary{params.Get("secondary", "")};
+        secondary.Erase("secondary");
+        const auto is_button = [](const Common::ParamPackage& binding) {
+            return (binding.Has("button") || binding.Has("code") || binding.Has("hat") ||
+                    binding.Has("axis")) &&
+                   !binding.Has("axis_x") && !binding.Has("motion") && !binding.Has("battery") &&
+                   !binding.Has("color") && !binding.Has("camera") && !binding.Has("nfc");
+        };
+        if (is_button(primary) && is_button(secondary)) {
+            return std::make_unique<InputFromButtons>(
+                Create(primary), Common::Input::CreateInputDeviceFromString(secondary.Serialize()),
+                primary.Get("toggle", false), primary.Get("turbo", false),
+                primary.Has("axis") || secondary.Has("axis"));
+        }
+        return Create(primary);
+    }
     if (params.Has("battery")) {
         return CreateBatteryDevice(params);
     }

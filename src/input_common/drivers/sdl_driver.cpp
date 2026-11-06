@@ -9,6 +9,7 @@
 #include "common/logging.h"
 #include "common/math_util.h"
 #include "common/param_package.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "common/vector_math.h"
@@ -332,6 +333,11 @@ public:
         return false;
     }
 
+    bool IsSwitch2Pro() const {
+        return sdl_joystick && SDL_GetJoystickVendor(sdl_joystick.get()) == 0x057e &&
+               SDL_GetJoystickProduct(sdl_joystick.get()) == 0x2069;
+    }
+
     Common::Input::BatteryLevel GetBatteryLevel(SDL_PowerState battery_level, int percent) {
         if (battery_level == SDL_POWERSTATE_CHARGING) {
             return Common::Input::BatteryLevel::Charging;
@@ -368,6 +374,9 @@ public:
     }
 
     std::string GetControllerName() const {
+        if (IsSwitch2Pro()) {
+            return "Nintendo Switch 2 Pro Controller";
+        }
         if (sdl_controller) {
             switch (SDL_GetGamepadType(sdl_controller.get())) {
             case SDL_GAMEPAD_TYPE_XBOX360:
@@ -1187,7 +1196,49 @@ MotionMapping SDLDriver::GetMotionMappingForDevice(const Common::ParamPackage& p
 
 Common::Input::ButtonNames SDLDriver::GetUIName(const Common::ParamPackage& params) const {
     if (params.Has("button")) {
-        // TODO(German77): Find how to substitute the values for real button names
+        const auto guid = params.Get("guid", "");
+        const auto port = params.Get("port", -1);
+        std::shared_ptr<SDLJoystick> joystick;
+        {
+            std::scoped_lock lock{joystick_map_mutex};
+            const auto it =
+                std::find_if(joystick_map.begin(), joystick_map.end(), [&guid](const auto& entry) {
+                    return entry.first.RawString() == guid;
+                });
+            if (it != joystick_map.end() && port >= 0 &&
+                static_cast<std::size_t>(port) < it->second.size()) {
+                joystick = it->second[static_cast<std::size_t>(port)];
+            }
+        }
+        if (joystick) {
+            // SDL device callbacks also acquire joystick_map_mutex, so release it before SDL's
+            // lock.
+            SDL_LockJoysticks();
+            SCOPE_EXIT {
+                SDL_UnlockJoysticks();
+            };
+            if (joystick->IsSwitch2Pro()) {
+                const auto bindings = GetBindings(joystick->GetSDLGameController());
+                const auto button = params.Get("button", -1);
+                const auto binding = FindBinding(bindings, [button](const auto& current) {
+                    return current.input_type == SDL_GAMEPAD_BINDTYPE_BUTTON &&
+                           current.input.button == button &&
+                           current.output_type == SDL_GAMEPAD_BINDTYPE_BUTTON;
+                });
+                if (binding.input_type != SDL_GAMEPAD_BINDTYPE_NONE) {
+                    switch (binding.output.button) {
+                    case SDL_GAMEPAD_BUTTON_LEFT_PADDLE1:
+                        return Common::Input::ButtonNames::ButtonGL;
+                    case SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1:
+                        return Common::Input::ButtonNames::ButtonGR;
+                    case SDL_GAMEPAD_BUTTON_MISC2:
+                        return Common::Input::ButtonNames::ButtonC;
+                    default:
+                        break;
+                    }
+                }
+            }
+        }
         return Common::Input::ButtonNames::Value;
     }
     if (params.Has("hat")) {

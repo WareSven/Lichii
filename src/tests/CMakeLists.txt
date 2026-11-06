@@ -40,6 +40,7 @@ add_executable(tests
     video_core/storage_buffer_control_flow.cpp
     core/nup_validation.cpp
     input_common/calibration_lifetime.cpp
+    input_common/alternate_button.cpp
     video_core/ampere_logged_numeric.cpp
     video_core/ampere_logged_textures.cpp
     video_core/native_texture_header_index.cpp
@@ -156,6 +157,11 @@ create_target_directory_groups(tests)
 
 target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
+
+if (WIN32)
+    target_sources(tests PRIVATE input_common/switch2_controller.cpp)
+    target_link_libraries(tests PRIVATE SDL3::SDL3)
+endif()
 
 if (TARGET dynarmic::dynarmic)
     target_sources(tests PRIVATE core/window_trace.cpp)

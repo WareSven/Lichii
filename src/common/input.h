@@ -298,6 +298,11 @@ enum class ButtonNames {
     ButtonForward,
     ButtonTask,
     ButtonExtra,
+
+    // Switch 2 Pro Controller buttons
+    ButtonGL,
+    ButtonGR,
+    ButtonC,
 };
 
 // Callback data consisting of an input type and the equivalent data status

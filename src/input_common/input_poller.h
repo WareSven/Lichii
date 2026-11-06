@@ -62,6 +62,7 @@ public:
      *               - "axis_y": same as axis but specifying vertical direction
      *               - "axis_z": same as axis but specifying forward direction
      *               - "battery": Only used as a placeholder to set the input type
+     *               - "secondary": serialized alternate button binding, ORed with the primary
      * @returns a unique input device with the parameters specified
      */
     std::unique_ptr<Common::Input::InputDevice> Create(const Common::ParamPackage& params) override;
