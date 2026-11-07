@@ -925,6 +925,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t queued_graphics = 0;
     GraphicsPipelineLoadPlan graphics_load_plan;
     std::unordered_set<u64> prebuild_keys;
+    const bool replay_latest_records = Settings::CurrentProgramIsSwitch2();
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -940,6 +941,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         std::mutex mutex;
         size_t total{};
         size_t built{};
+        size_t compute_succeeded{};
+        size_t compute_failed{};
+        size_t graphics_succeeded{};
+        std::vector<u64> graphics_failed;
         bool has_loaded{};
         std::unique_ptr<PipelineStatistics> statistics;
     } state;
@@ -947,10 +952,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (device.IsKhrPipelineExecutablePropertiesEnabled()) {
         state.statistics = std::make_unique<PipelineStatistics>(device);
     }
-    const auto load_compute{[&](std::ifstream& file, FileEnvironment env) {
+    struct ComputeRecord {
         ComputePipelineCacheKey key;
-        file.read(reinterpret_cast<char*>(&key), sizeof(key));
-
+        FileEnvironment env;
+    };
+    LatestPipelineRecords<ComputePipelineCacheKey, ComputeRecord> latest_compute;
+    const auto queue_compute{[&](ComputePipelineCacheKey key, FileEnvironment env) {
         workers.QueueWork([this, key, env_ = std::move(env), &state, &callback]() mutable {
             ShaderPools pools;
             auto entry{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
@@ -960,11 +967,14 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             }
             std::scoped_lock lock{state.mutex};
             if (entry.pipeline) {
+                ++state.compute_succeeded;
                 auto& existing = compute_cache[key];
                 if (!existing.pipeline || entry.pipeline->pointer_slots.size() >
                                               existing.pipeline->pointer_slots.size()) {
                     existing = std::move(entry);
                 }
+            } else {
+                ++state.compute_failed;
             }
             ++state.built;
             if (state.has_loaded) {
@@ -973,57 +983,22 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         });
         ++state.total;
     }};
-    const auto load_graphics{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
-        GraphicsPipelineCacheKey key;
+    const auto load_compute{[&](std::ifstream& file, FileEnvironment env) {
+        ComputePipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
-
-        if (!device.IsExtMeshShaderSupported() &&
-            std::ranges::any_of(envs, [](const FileEnvironment& env) {
-                return env.ShaderStage() == Shader::Stage::Task ||
-                       env.ShaderStage() == Shader::Stage::Mesh;
-            })) {
-            return;
+        if (replay_latest_records) {
+            latest_compute.Add(key, ComputeRecord{key, std::move(env)});
+        } else {
+            queue_compute(key, std::move(env));
         }
-
-        if ((key.state.extended_dynamic_state != 0) !=
-                dynamic_features.has_extended_dynamic_state ||
-            (key.state.extended_dynamic_state_2 != 0) !=
-                dynamic_features.has_extended_dynamic_state_2 ||
-            (key.state.extended_dynamic_state_2_logic_op != 0) !=
-                dynamic_features.has_extended_dynamic_state_2_logic_op ||
-            (key.state.extended_dynamic_state_3_blend != 0) !=
-                dynamic_features.has_extended_dynamic_state_3_blend ||
-            (key.state.extended_dynamic_state_3_enables != 0) !=
-                dynamic_features.has_extended_dynamic_state_3_enables ||
-            (key.state.color_write_enable_dynamic != 0) !=
-                dynamic_features.has_color_write_enable ||
-            (key.state.dynamic_vertex_input != 0) !=
-                dynamic_features.has_dynamic_vertex_input) {
-            return;
-        }
-
-        const bool key_requests_provoking_last = key.state.provoking_vertex_last != 0;
-        if (key_requests_provoking_last && !dynamic_features.has_provoking_vertex_last_mode) {
-            return;
-        }
-
-        const bool key_uses_transform_feedback = key.state.xfb_enabled != 0;
-        if (key_uses_transform_feedback && key_requests_provoking_last &&
-            !dynamic_features.has_provoking_vertex_tf_preserve) {
-            return;
-        }
-
-        const u64 old_hash = key.Hash();
-        if (envs.size() > Maxwell::MaxShaderProgram) {
-            return;
-        }
-        std::array<Shader::Stage, Maxwell::MaxShaderProgram> stages{};
-        std::ranges::transform(envs, stages.begin(), &FileEnvironment::ShaderStage);
-        NormalizeMeshVertexInput(key.state,
-                                 HasMeshShaderSlots(key.unique_hashes) &&
-                                     HasOnlyMeshStages(std::span{stages}.first(envs.size())));
+    }};
+    struct GraphicsRecord {
+        GraphicsPipelineCacheKey key;
+        std::vector<FileEnvironment> envs;
+    };
+    LatestPipelineRecords<GraphicsPipelineCacheKey, GraphicsRecord> latest_graphics;
+    const auto queue_graphics{[&](GraphicsPipelineCacheKey key, std::vector<FileEnvironment> envs) {
         const u64 hash = key.Hash();
-        MigrateUsedPipelineHash(used_pipelines, old_hash, hash);
         const bool preload = PreloadAllPipelines() || Settings::CurrentProgramIsSwitch2() ||
                              (used_pipelines.empty() ? queued_graphics < MaxPipelinesWithoutUsedList
                                                      : used_pipelines.contains(hash));
@@ -1091,7 +1066,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             // A failed one is left out, as in the background prebuild, so the first draw that
             // needs it builds it again instead of being skipped for the whole session.
             if (pipeline && !pipeline->Failed()) {
+                ++state.graphics_succeeded;
                 graphics_cache.emplace(key, std::move(pipeline));
+            } else {
+                state.graphics_failed.push_back(key.Hash());
             }
             ++state.built;
             if (state.has_loaded) {
@@ -1100,8 +1078,77 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         });
         ++state.total;
     }};
+    const auto load_graphics{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
+        GraphicsPipelineCacheKey key;
+        file.read(reinterpret_cast<char*>(&key), sizeof(key));
+
+        if (!device.IsExtMeshShaderSupported() &&
+            std::ranges::any_of(envs, [](const FileEnvironment& env) {
+                return env.ShaderStage() == Shader::Stage::Task ||
+                       env.ShaderStage() == Shader::Stage::Mesh;
+            })) {
+            return;
+        }
+
+        if ((key.state.extended_dynamic_state != 0) !=
+                dynamic_features.has_extended_dynamic_state ||
+            (key.state.extended_dynamic_state_2 != 0) !=
+                dynamic_features.has_extended_dynamic_state_2 ||
+            (key.state.extended_dynamic_state_2_logic_op != 0) !=
+                dynamic_features.has_extended_dynamic_state_2_logic_op ||
+            (key.state.extended_dynamic_state_3_blend != 0) !=
+                dynamic_features.has_extended_dynamic_state_3_blend ||
+            (key.state.extended_dynamic_state_3_enables != 0) !=
+                dynamic_features.has_extended_dynamic_state_3_enables ||
+            (key.state.color_write_enable_dynamic != 0) !=
+                dynamic_features.has_color_write_enable ||
+            (key.state.dynamic_vertex_input != 0) !=
+                dynamic_features.has_dynamic_vertex_input) {
+            return;
+        }
+
+        const bool key_requests_provoking_last = key.state.provoking_vertex_last != 0;
+        if (key_requests_provoking_last && !dynamic_features.has_provoking_vertex_last_mode) {
+            return;
+        }
+
+        const bool key_uses_transform_feedback = key.state.xfb_enabled != 0;
+        if (key_uses_transform_feedback && key_requests_provoking_last &&
+            !dynamic_features.has_provoking_vertex_tf_preserve) {
+            return;
+        }
+
+        const u64 old_hash = key.Hash();
+        if (envs.size() > Maxwell::MaxShaderProgram) {
+            return;
+        }
+        std::array<Shader::Stage, Maxwell::MaxShaderProgram> stages{};
+        std::ranges::transform(envs, stages.begin(), &FileEnvironment::ShaderStage);
+        NormalizeMeshVertexInput(key.state,
+                                 HasMeshShaderSlots(key.unique_hashes) &&
+                                     HasOnlyMeshStages(std::span{stages}.first(envs.size())));
+        const u64 hash = key.Hash();
+        MigrateUsedPipelineHash(used_pipelines, old_hash, hash);
+        if (replay_latest_records) {
+            latest_graphics.Add(key, GraphicsRecord{key, std::move(envs)});
+        } else {
+            queue_graphics(key, std::move(envs));
+        }
+    }};
     VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION, load_compute,
                                load_graphics);
+    for (auto& record : latest_compute.Take()) {
+        if (stop_loading.stop_requested()) {
+            break;
+        }
+        queue_compute(record.key, std::move(record.env));
+    }
+    for (auto& record : latest_graphics.Take()) {
+        if (stop_loading.stop_requested()) {
+            break;
+        }
+        queue_graphics(record.key, std::move(record.envs));
+    }
 
     LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
     if (skipped_pipelines != 0) {
@@ -1117,6 +1164,20 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     lock.unlock();
 
     workers.WaitForRequests(stop_loading);
+
+    {
+        std::scoped_lock replay_lock{state.mutex};
+        if (replay_latest_records) {
+            for (const u64 hash : state.graphics_failed) {
+                graphics_load_plan.ForgetFailed(disk_pipelines, hash);
+            }
+        }
+        LOG_INFO(Render_Vulkan,
+                 "Nx2Perf disk_replay: {} queued, {} completed, {} graphics succeeded, "
+                 "{} graphics failed, {} compute succeeded, {} compute failed, cancelled={}",
+                 state.total, state.built, state.graphics_succeeded, state.graphics_failed.size(),
+                 state.compute_succeeded, state.compute_failed, stop_loading.stop_requested());
+    }
 
     if (use_vulkan_pipeline_cache) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
@@ -2083,7 +2144,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         env.Dump(hash, key.unique_hashes[index]);
     }
-    LOG_ERROR(Render_Vulkan, "{}", exception.what());
+    LOG_ERROR(Render_Vulkan, "Graphics pipeline compilation failed pipeline={:016x}: {}",
+              key.Hash(), exception.what());
     return nullptr;
 }
 

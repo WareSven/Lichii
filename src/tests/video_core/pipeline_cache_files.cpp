@@ -6,9 +6,14 @@
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "shader_recompiler/frontend/ampere/program_address_map.h"
+#include "shader_recompiler/frontend/ir/ir_emitter.h"
+#include "shader_recompiler/host_translate_info.h"
+#include "shader_recompiler/ir_opt/passes.h"
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_vulkan/mesh_pipeline_key.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -60,6 +65,15 @@ public:
         texture_types.emplace(3, Shader::TextureType::Color2D);
     }
 
+    void MarkNative() {
+        Shader::Ampere::AppendNativeAddressMap(code, std::array<u32, 1>{0});
+        cached_highest = static_cast<u32>((code.size() - 1) * sizeof(u64));
+    }
+
+    void RecordPointerClassification(u32 offset, bool is_pointer) {
+        storage_pointer_types.emplace(offset, static_cast<u8>(is_pointer));
+    }
+
     u32 ReadCbufValue(u32, u32) override {
         return 0;
     }
@@ -81,6 +95,172 @@ public:
 };
 
 } // Anonymous namespace
+
+TEST_CASE("Sparse graphics replay recaptures and persists the latest normalized environment",
+          "[video_core][pipeline_cache_files][mesh_pipeline_key][storage_buffer]") {
+    namespace IR = Shader::IR;
+    const auto track = [](Shader::Environment& env) {
+        Shader::ObjectPool<IR::Inst> pool{256};
+        IR::Block entry{pool};
+        IR::Program program;
+        program.stage = env.ShaderStage();
+        program.blocks = {&entry};
+        program.post_order_blocks = {&entry};
+        IR::IREmitter ir{entry};
+        const auto word = [&](u32 offset) { return ir.GetCbuf(ir.Imm32(0), ir.Imm32(offset)); };
+        const IR::U32 lane{ir.LocalInvocationIdX()};
+        const IR::U32 row{ir.IAdd(ir.ShiftLeftLogical(lane, ir.Imm32(3)), word(0x1c0))};
+        const IR::U32 low{ir.IAdd(ir.IAdd(row, word(0x178)),
+                                ir.ShiftLeftLogical(lane, ir.Imm32(4)))};
+        ir.WriteGlobal32(ir.PackUint2x32(ir.CompositeConstruct(low, word(0x17c))), lane);
+        Shader::HostTranslateInfo host{};
+        host.min_ssbo_alignment = 16;
+        Shader::Optimization::GlobalMemoryToStorageBufferPass(env, program, host);
+        std::vector<u32> offsets;
+        for (const auto& descriptor : program.info.storage_buffers_descriptors) {
+            offsets.push_back(descriptor.cbuf_offset);
+        }
+        return offsets;
+    };
+    struct Record {
+        Vulkan::GraphicsPipelineCacheKey key;
+        std::vector<VideoCommon::FileEnvironment> envs;
+    };
+    TempDir temp;
+    const auto path = temp.path / "sparse-graphics-v53.bin";
+    const auto load_latest = [&] {
+        Vulkan::LatestPipelineRecords<Vulkan::GraphicsPipelineCacheKey, Record> records;
+        VideoCommon::LoadPipelines(
+            {}, path, VideoCommon::VulkanPipelineCacheVersion,
+            [](std::ifstream&, VideoCommon::FileEnvironment) { FAIL("Unexpected compute record"); },
+            [&](std::ifstream& file, std::vector<VideoCommon::FileEnvironment> envs) {
+                Vulkan::GraphicsPipelineCacheKey key;
+                file.read(reinterpret_cast<char*>(&key), sizeof(key));
+                REQUIRE(envs.size() == 1);
+                REQUIRE(envs.front().ShaderStage() == Shader::Stage::Mesh);
+                REQUIRE(envs.front().IsNativeProgram());
+                Vulkan::NormalizeMeshVertexInput(key.state,
+                    Vulkan::HasMeshShaderSlots(key.unique_hashes) &&
+                    Vulkan::HasOnlyMeshStages(std::array{envs.front().ShaderStage()}));
+                records.Add(key, Record{key, std::move(envs)});
+            });
+        return records.Take();
+    };
+    SerializedEnvironment sparse{Shader::Stage::Mesh};
+    sparse.MarkNative();
+    sparse.RecordPointerClassification(0x178, true);
+    Vulkan::GraphicsPipelineCacheKey key{};
+    key.unique_hashes[1] = 11;
+    key.state.dynamic_vertex_input.Assign(1);
+    key.state.attribute_types = 0x155;
+    VideoCommon::SerializePipeline(key, std::array<const VideoCommon::GenericEnvironment*, 1>{&sparse},
+                                   path, VideoCommon::VulkanPipelineCacheVersion);
+    const auto old_file = ReadAll(path);
+    auto first = load_latest();
+    REQUIRE(first.size() == 1);
+    const u64 hash = first.front().key.Hash();
+    std::unordered_set<u64> disk;
+    Vulkan::GraphicsPipelineLoadPlan plan;
+    REQUIRE(plan.Add(disk, hash, true) == Vulkan::GraphicsPipelineLoadAction::Preload);
+    // The old paired-pointer path never asked whether this scalar was mapped memory.
+    REQUIRE_THROWS_WITH(track(first.front().envs.front()),
+                        "Uncached storage pointer classification c0[0x1c0]");
+    plan.ForgetFailed(disk, hash);
+    REQUIRE_FALSE(disk.contains(hash));
+    CHECK(ReadAll(path) == old_file);
+
+    SerializedEnvironment recaptured{Shader::Stage::Mesh};
+    recaptured.MarkNative();
+    recaptured.RecordPointerClassification(0x178, true);
+    recaptured.RecordPointerClassification(0x1c0, false);
+    REQUIRE(track(recaptured) == std::vector<u32>{0x178});
+    key.state.attribute_types = 0x105; // A different legacy alias, same normalized pipeline.
+    if (disk.insert(hash).second) {
+        VideoCommon::SerializePipeline(
+            key, std::array<const VideoCommon::GenericEnvironment*, 1>{&recaptured}, path,
+            VideoCommon::VulkanPipelineCacheVersion);
+    }
+    const auto repaired_file = ReadAll(path);
+    REQUIRE(repaired_file.size() > old_file.size());
+    CHECK(repaired_file.starts_with(old_file));
+    auto second = load_latest();
+    REQUIRE(second.size() == 1);
+    CHECK(second.front().key.Hash() == hash);
+    CHECK(track(second.front().envs.front()) == std::vector<u32>{0x178});
+    CHECK_FALSE(second.front().envs.front().IsCbufStorageBufferPointer(0, 0x1c0));
+    REQUIRE_THROWS_AS(second.front().envs.front().IsCbufStorageBufferPointer(0, 0x200),
+                      Shader::LogicError);
+    CHECK(ReadAll(path) == repaired_file);
+}
+
+TEST_CASE("Compute replay keeps the last serialized record per full key without merging answers",
+          "[video_core][pipeline_cache_files][storage_buffer]") {
+    struct Record {
+        Vulkan::ComputePipelineCacheKey key;
+        VideoCommon::FileEnvironment env;
+    };
+    TempDir temp;
+    const auto path = temp.path / "compute-recapture-v53.bin";
+    const Vulkan::ComputePipelineCacheKey key{
+        .unique_hash = 0x1234, .shared_memory_size = 1024, .workgroup_size = {32, 1, 1}};
+    auto different_group = key;
+    different_group.workgroup_size[0] = 64;
+    auto different_shared = key;
+    different_shared.shared_memory_size = 2048;
+    SerializedEnvironment sparse{Shader::Stage::Compute};
+    sparse.MarkNative();
+    sparse.RecordPointerClassification(0x178, true);
+    sparse.RecordPointerClassification(0x200, true);
+    const std::array<const VideoCommon::GenericEnvironment*, 1> old_env{&sparse};
+    for (const auto& distinct : {key, different_group, different_shared}) {
+        VideoCommon::SerializePipeline(distinct, old_env, path,
+                                       VideoCommon::VulkanPipelineCacheVersion);
+    }
+    const auto old_file = ReadAll(path);
+    SerializedEnvironment recaptured{Shader::Stage::Compute};
+    recaptured.MarkNative();
+    recaptured.RecordPointerClassification(0x178, true);
+    recaptured.RecordPointerClassification(0x1c0, false);
+    VideoCommon::SerializePipeline(
+        key, std::array<const VideoCommon::GenericEnvironment*, 1>{&recaptured}, path,
+        VideoCommon::VulkanPipelineCacheVersion);
+    const auto appended_file = ReadAll(path);
+    REQUIRE(appended_file.starts_with(old_file));
+    REQUIRE(appended_file.size() > old_file.size());
+    Vulkan::LatestPipelineRecords<Vulkan::ComputePipelineCacheKey, Record> latest;
+    size_t read{};
+    VideoCommon::LoadPipelines(
+        {}, path, VideoCommon::VulkanPipelineCacheVersion,
+        [&](std::ifstream& file, VideoCommon::FileEnvironment env) {
+            Vulkan::ComputePipelineCacheKey restored;
+            file.read(reinterpret_cast<char*>(&restored), sizeof(restored));
+            if (++read <= 3) {
+                REQUIRE_THROWS_AS(env.IsCbufStorageBufferPointer(0, 0x1c0), Shader::LogicError);
+            }
+            latest.Add(restored, Record{restored, std::move(env)});
+        },
+        [](std::ifstream&, std::vector<VideoCommon::FileEnvironment>) {
+            FAIL("Unexpected graphics record");
+        });
+    CHECK(read == 4);
+    auto records = latest.Take();
+    REQUIRE(records.size() == 3);
+    size_t refreshed{};
+    for (auto& record : records) {
+        CHECK(record.env.IsCbufStorageBufferPointer(0, 0x178));
+        if (record.key == key) {
+            ++refreshed;
+            CHECK_FALSE(record.env.IsCbufStorageBufferPointer(0, 0x1c0));
+            REQUIRE_THROWS_AS(record.env.IsCbufStorageBufferPointer(0, 0x200), Shader::LogicError);
+        } else {
+            CHECK(record.env.IsCbufStorageBufferPointer(0, 0x200));
+            REQUIRE_THROWS_AS(record.env.IsCbufStorageBufferPointer(0, 0x1c0), Shader::LogicError);
+        }
+    }
+    CHECK(refreshed == 1);
+    CHECK(latest.Take().empty());
+    CHECK(ReadAll(path) == appended_file);
+}
 
 TEST_CASE("Task and mesh disk environments roundtrip all translation state and record boundaries",
           "[pipeline_cache_files][mesh_serialization]") {

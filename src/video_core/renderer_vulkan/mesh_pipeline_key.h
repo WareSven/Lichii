@@ -7,6 +7,8 @@
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "shader_recompiler/stage.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
@@ -94,8 +96,37 @@ public:
         return GraphicsPipelineLoadAction::Duplicate;
     }
 
+    void ForgetFailed(std::unordered_set<u64>& disk_pipelines, u64 hash) {
+        disk_pipelines.erase(hash);
+        deferred.erase(hash);
+    }
+
 private:
     std::unordered_set<u64> deferred;
+};
+
+// A live recapture is appended after an older, incomplete environment. Keep the whole
+// latest record for each normalized key; never merge or guess its translation answers.
+template <typename Key, typename Record>
+class LatestPipelineRecords {
+public:
+    void Add(const Key& key, Record record) {
+        const auto [it, inserted] = indices.try_emplace(key, records.size());
+        if (inserted) {
+            records.push_back(std::move(record));
+        } else {
+            records[it->second] = std::move(record);
+        }
+    }
+
+    std::vector<Record> Take() {
+        indices.clear();
+        return std::exchange(records, {});
+    }
+
+private:
+    std::unordered_map<Key, size_t> indices;
+    std::vector<Record> records;
 };
 
 } // namespace Vulkan
