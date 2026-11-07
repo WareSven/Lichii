@@ -1844,11 +1844,13 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     mesh_info = program.mesh;
     mesh_threads = program.workgroup_size[0];
     // The task's output region, which its mesh workgroups read as their input region.
-    const Id payload_type{TypeArray(U32[1], Const(mesh_info.payload_words))};
-    mesh_payload = DefineVariable(*this, payload_type, std::nullopt,
-                                  spv::StorageClass::TaskPayloadWorkgroupEXT);
-    Name(mesh_payload, "task_payload");
-    mesh_payload_u32 = TypePointer(spv::StorageClass::TaskPayloadWorkgroupEXT, U32[1]);
+    if (stage == Stage::Task || program.info.reads_task_payload) {
+        const Id payload_type{TypeArray(U32[1], Const(mesh_info.payload_words))};
+        mesh_payload = DefineVariable(*this, payload_type, std::nullopt,
+                                      spv::StorageClass::TaskPayloadWorkgroupEXT);
+        Name(mesh_payload, "task_payload");
+        mesh_payload_u32 = TypePointer(spv::StorageClass::TaskPayloadWorkgroupEXT, U32[1]);
+    }
     if (stage == Stage::Task) {
         return;
     }

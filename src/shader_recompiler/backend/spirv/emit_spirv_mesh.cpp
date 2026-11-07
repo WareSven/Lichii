@@ -168,15 +168,16 @@ void MeshEpilogue(EmitContext& ctx) {
 }
 } // Anonymous namespace
 
-Id EmitIsbeRead(EmitContext& ctx, Id address) {
+Id EmitIsbeRead(EmitContext& ctx, const IR::Value& address) {
     const Id workgroup{
         ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), 0U)};
-    if (ctx.stage == Stage::Task) {
+    if (ctx.stage == Stage::Task || (address.IsImmediate() && address.U32() == 0)) {
         return workgroup; // the input region holds the workgroup index (VERTEX_ID)
     }
-    const Id index{ctx.OpShiftRightLogical(ctx.U32[1], address, ctx.Const(2U))};
+    const Id address_id{ctx.Def(address)};
+    const Id index{ctx.OpShiftRightLogical(ctx.U32[1], address_id, ctx.Const(2U))};
     const Id word{ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, index))};
-    return ctx.OpSelect(ctx.U32[1], ctx.OpIEqual(ctx.U1, address, ctx.u32_zero_value), workgroup,
+    return ctx.OpSelect(ctx.U32[1], ctx.OpIEqual(ctx.U1, address_id, ctx.u32_zero_value), workgroup,
                         word);
 }
 

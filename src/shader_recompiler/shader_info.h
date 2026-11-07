@@ -279,6 +279,7 @@ struct Info {
     bool is_task{}; ///< Switch 2 task program (Stage::Task)
     bool is_mesh{}; ///< Switch 2 mesh program (Stage::Mesh)
     bool uses_workgroup_id{};
+    bool reads_task_payload{};
     bool uses_local_invocation_id{};
     bool uses_invocation_id{};
     bool uses_invocation_info{};

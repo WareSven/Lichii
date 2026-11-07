@@ -120,6 +120,10 @@ void CheckCBufNVN(Info& info, IR::Inst& inst) {
 
 /// Records the features, types and resources an instruction needs in the shader info
 void VisitUsages(Info& info, IR::Inst& inst) {
+    if (inst.GetOpcode() == IR::Opcode::IsbeRead) {
+        const IR::Value address{inst.Arg(0)};
+        info.reads_task_payload |= !address.IsImmediate() || address.U32() != 0;
+    }
     switch (inst.GetOpcode()) {
     case IR::Opcode::ImageRead:
     case IR::Opcode::ImageWrite:
