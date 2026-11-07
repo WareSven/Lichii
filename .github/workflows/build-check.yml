@@ -2,16 +2,17 @@ name: build-check
 
 on:
   pull_request:
-    branches: [nx2]
+    branches: [nx2, nx2-experimental]
   push:
-    branches: [nx2]
+    branches: [nx2, nx2-experimental]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-check-${{ github.ref }}
+  group: build-check-${{ github.workflow }}-${{ github.ref }}-${{ github.workflow == 'release-binaries' && github.run_id || 'latest' }}
   cancel-in-progress: true
 
 jobs:
@@ -28,6 +29,12 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
+
+      - name: Test development pipeline
+        run: python3 -m unittest discover -s tools/nx2 -p 'test_work_pipeline*.py' -v
+
+      - name: Test shader parsers
+        run: python3 -m unittest discover -s tools/nx2 -p 'test_shader_*.py' -v
 
       - name: Install Linux dependencies
         run: |
