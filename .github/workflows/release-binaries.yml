@@ -6,16 +6,13 @@ on:
       publish_release:
         description: Publish the binaries as a GitHub release
         type: boolean
-        default: true
+        default: false
   push:
     branches:
       - nx2-experimental
-    # A binary only changes when build inputs change; docs-only pushes skip the build.
+    # Validate and build source, test, or workflow changes; docs-only pushes skip this pipeline.
     paths:
       - "src/**"
-      # Test-only changes cannot change a binary: the build configures with BUILD_TESTING=OFF and
-      # YUZU_TESTS=OFF below, so a push that only touches src/tests has nothing to rebuild.
-      - "!src/tests/**"
       - "CMakeLists.txt"
       - "CMakeModules/**"
       - "externals/**"
@@ -23,6 +20,7 @@ on:
       - "tools/**"
       - ".patch/**"
       - "cpmfile.json"
+      - ".github/workflows/build-check.yml"
       - ".github/workflows/release-binaries.yml"
 
 permissions:
@@ -41,8 +39,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validation:
+    name: Validate source and tests
+    uses: ./.github/workflows/build-check.yml
+    permissions:
+      contents: read
+
   prepare-release:
     name: Prepare release
+    needs: validation
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -620,9 +625,8 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-  # Publishes every binary as a GitHub pre-release once every platform built: on pushes to
-  # nx2-experimental, and on manual runs unless "Publish the binaries as a GitHub release" is
-  # unticked.
+  # Publish only after validation and every platform build: automatically on nx2-experimental
+  # pushes, or when explicitly selected for a manual run.
   release:
     name: Publish release
     needs: build
