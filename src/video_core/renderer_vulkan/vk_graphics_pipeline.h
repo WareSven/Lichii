@@ -105,7 +105,7 @@ public:
         PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
         const GraphicsPipelineCacheKey& key, std::array<vk::ShaderModule, NUM_STAGES> stages,
         const std::array<const Shader::Info*, NUM_STAGES>& infos,
-        EmitStagesFunc emit_stages = {}, LibraryParams library_params = {});
+        EmitStagesFunc emit_stages, LibraryParams library_params);
 
     static std::chrono::nanoseconds TakeHoldTime() noexcept;
 
