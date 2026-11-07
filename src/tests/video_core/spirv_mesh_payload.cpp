@@ -79,6 +79,7 @@ std::vector<u32> Emit(Stage stage, Read read, u32 payload_words) {
     program.syntax_list = {{{.block = &block}, IR::AbstractSyntaxNode::Type::Block},
                            {{}, IR::AbstractSyntaxNode::Type::Return}};
     IR::IREmitter ir{block};
+    ir.Prologue();
     if (read != Read::None) {
         const IR::U32 address = read == Read::Dynamic ? ir.WorkgroupIdX()
                                 : read == Read::FoldedZero
@@ -90,6 +91,7 @@ std::vector<u32> Emit(Stage stage, Read read, u32 payload_words) {
             ir.IsbeWriteAttribute(ir.Imm32(0), value);
         }
     }
+    ir.Epilogue();
     Optimization::ConstantPropagationPass(env, program);
     Optimization::DeadCodeEliminationPass(program);
     Optimization::CollectShaderInfoPass(env, program);
@@ -167,6 +169,12 @@ void CheckPayload(const std::vector<u32>& code, u32 expected_words) {
     }
 }
 
+void CheckEpilogue(const std::vector<u32>& code, Stage stage) {
+    const auto opcode =
+        stage == Stage::Task ? spv::Op::OpEmitMeshTasksEXT : spv::Op::OpSetMeshOutputsEXT;
+    REQUIRE(Instructions(code, opcode).size() == 1);
+}
+
 void CheckGroupIndex(const std::vector<u32>& code) {
     u32 workgroup_id{};
     for (const auto& decoration : Instructions(code, spv::Op::OpDecorate)) {
@@ -194,6 +202,7 @@ TEST_CASE("Mesh group index and dead reads need no task payload",
         CAPTURE(static_cast<int>(read));
         for (const u32 words : {64U, 800U}) {
             const auto code = Emit(Stage::Mesh, read, words);
+            CheckEpilogue(code, Stage::Mesh);
             CheckPayload(code, 0);
             if (read == Read::Zero || read == Read::FoldedZero) {
                 CheckGroupIndex(code);
@@ -206,14 +215,19 @@ TEST_CASE("Mesh payload reads retain the captured size", "[video_core][spirv][me
     for (const Read read : {Read::Nonzero, Read::Dynamic}) {
         CAPTURE(static_cast<int>(read));
         for (const u32 words : {64U, 800U}) {
-            CheckPayload(Emit(Stage::Mesh, read, words), words);
+            const auto code = Emit(Stage::Mesh, read, words);
+            CheckEpilogue(code, Stage::Mesh);
+            CheckPayload(code, words);
         }
     }
 }
 
 TEST_CASE("Task epilogue always retains its payload", "[video_core][spirv][mesh_payload]") {
     for (const u32 words : {64U, 800U}) {
-        CheckPayload(Emit(Stage::Task, Read::None, words), words);
-        CheckPayload(Emit(Stage::Task, Read::Zero, words), words);
+        for (const Read read : {Read::None, Read::Zero}) {
+            const auto code = Emit(Stage::Task, read, words);
+            CheckEpilogue(code, Stage::Task);
+            CheckPayload(code, words);
+        }
     }
 }
