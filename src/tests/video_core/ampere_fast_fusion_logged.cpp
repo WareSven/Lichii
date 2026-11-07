@@ -346,6 +346,8 @@ struct HalfIR {
     IR::Block block{pool};
     HalfEnvironment env;
     std::array<u32, IR::NUM_REGS> registers{};
+    std::unordered_map<u64, u32> constants;
+    u32 constant_reads{};
     std::unordered_map<const IR::Inst*, u64> values;
 
     explicit HalfIR(std::span<const u64> code) {
@@ -361,6 +363,8 @@ struct HalfIR {
                 visitor.FMNMX_reg(word);
             else if ((word >> 48) == 0x5c98)
                 visitor.MOV_reg(word);
+            else if ((word >> 48) == 0x4c98)
+                visitor.MOV_cbuf(word);
             else if ((word >> 48) == 0x5c28)
                 visitor.SHR_reg(word);
             else if ((word >> 48) == 0x38f8)
@@ -406,7 +410,7 @@ struct HalfIR {
                                              : f64(std::bit_cast<f32>(u32(Value(value))));
     }
 
-    u64 Evaluate(const IR::Inst& inst) const {
+    u64 Evaluate(const IR::Inst& inst) {
         const auto a = [&](size_t index) { return Value(inst.Arg(index)); };
         const auto f = [&](size_t index) { return Float(inst.Arg(index)); };
         const auto fp = [](f64 value) { return std::bit_cast<u32>(f32(value)); };
@@ -426,6 +430,9 @@ struct HalfIR {
             return a(0);
         case IR::Opcode::GetRegister:
             return registers.at(static_cast<size_t>(inst.Arg(0).Reg()));
+        case IR::Opcode::GetCbufU32:
+            ++constant_reads;
+            return constants.at((a(0) << 32) | a(1));
         case IR::Opcode::BitCastF32U32:
         case IR::Opcode::BitCastU32F32:
             return a(0);
@@ -549,6 +556,7 @@ struct HalfIR {
         registers.fill(0xdeadbeef);
         registers[source] = input;
         values.clear();
+        constant_reads = 0;
         for (const auto& inst : block.Instructions()) {
             if (inst.GetOpcode() == IR::Opcode::SetRegister)
                 registers.at(static_cast<size_t>(inst.Arg(0).Reg())) = u32(Value(inst.Arg(1)));
@@ -725,6 +733,39 @@ TEST_CASE("Ampere F2I signed byte clamps to the byte range", "[video_core][amper
              std::pair{std::numeric_limits<f32>::quiet_NaN(), 0U}}) {
         CAPTURE(input);
         CHECK(translation.Run(std::bit_cast<u32>(input), 5, 9) == expected);
+    }
+}
+
+TEST_CASE("Ampere byte F2I applies constant abs and neg before truncation and saturation",
+          "[video_core][ampere]") {
+    for (const bool is_signed : {false, true}) {
+        for (const u32 modifiers : {0U, 1U, 2U, 3U}) {
+            const Instruction convert{{0x00157b05, 0x00400400U | (modifiers << 30),
+                                       0x0021e000U | (is_signed ? 0x100U : 0U), 0x0001e400}};
+            const auto lowered = LowerToMaxwell(std::array{convert, Exit});
+            INFO(lowered.error);
+            REQUIRE(lowered);
+            HalfIR translation{lowered.instructions};
+            for (const f32 input : {0.0f, -0.0f, 1.9f, -1.9f, 127.9f, -127.9f,
+                                    128.9f, -128.9f, 255.9f, -255.9f, 65536.0f, -65536.0f,
+                                    std::numeric_limits<f32>::infinity(),
+                                    -std::numeric_limits<f32>::infinity(),
+                                    std::numeric_limits<f32>::quiet_NaN()}) {
+                translation.constants[(u64{1} << 32) | 16] = std::bit_cast<u32>(input);
+                f32 value = modifiers & 1 ? std::abs(input) : input;
+                if (modifiers & 2)
+                    value = -value;
+                const s32 expected = std::isnan(value) ? 0 : static_cast<s32>(
+                    std::clamp(value, is_signed ? -128.0f : 0.0f, is_signed ? 127.0f : 255.0f));
+                CAPTURE(is_signed, modifiers, input);
+                CHECK(translation.Run(0, 3, 21) == static_cast<u32>(expected));
+                CHECK(translation.constant_reads == 1);
+                for (u32 reg = 0; reg < 246; ++reg) {
+                    if (reg != 21)
+                        CHECK(translation.registers[reg] == (reg == 3 ? 0U : 0xdeadbeefU));
+                }
+            }
+        }
     }
 }
 
@@ -990,17 +1031,20 @@ TEST_CASE(
     "Fast Fusion captured uniform carry outputs preserve unrelated UP and ordinary predicates",
     "[video_core][ampere][fast_fusion_logged]") {
     constexpr std::array values{0U, 1U, 0x7fffffffU, 0x80000000U, 0xffffffffU};
-    for (const auto instruction : {CapturedCarry, CapturedTwoCarries}) {
-        DYNAMIC_SECTION("mode " << instruction.words[2]) {
+    constexpr Instruction ocarina_carry{{0x0f067290, 6, 0x0ff5e03f, 0x000fe200}};
+    for (const auto instruction : {CapturedCarry, CapturedTwoCarries, ocarina_carry}) {
+        DYNAMIC_SECTION("instruction " << instruction.words[0] << " mode " << instruction.words[2]) {
             const auto lowered = LowerToMaxwell(std::array{instruction, Exit});
             INFO(lowered.error);
             REQUIRE(lowered);
+            const u32 source_a = instruction.Bits(24, 8) + 216;
+            const u32 destination = instruction.Bits(16, 8) + 216;
             LoggedMachine machine;
             for (u32 a : values) {
                 for (u32 b : values) {
                     for (u32 c : values) {
                         for (u32 packed : {0x12340015U, 0x1234006aU}) {
-                            machine.registers[0][225] = a;
+                            machine.registers[0][source_a] = a;
                             machine.registers[0][instruction.words[1] == 6 ? 222 : 220] = b;
                             if (instruction.words[1] == 4)
                                 machine.registers[0][222] = c;
@@ -1020,7 +1064,7 @@ TEST_CASE(
                             machine.Run(lowered.instructions);
                             CAPTURE(a, b, c, packed);
                             for (u32 reg = 0; reg < 246; ++reg)
-                                CHECK(machine.registers[0][reg] == (reg == 225 ? u32(sum)
+                                CHECK(machine.registers[0][reg] == (reg == destination ? u32(sum)
                                                                     : reg == 239
                                                                         ? expected_predicates
                                                                         : before[reg]));

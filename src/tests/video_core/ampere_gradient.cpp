@@ -163,9 +163,14 @@ TEST_CASE("Ampere signed high-word shifts keep sign extension", "[video_core][am
     }};
     const auto lowered = Shader::Ampere::LowerToMaxwell(code);
     REQUIRE(static_cast<bool>(lowered));
-    REQUIRE(((lowered.instructions[0] >> 8) & 0xff) == 68);
-    REQUIRE(((lowered.instructions[0] >> 20) & 0xff) == 37);
-    REQUIRE(((lowered.instructions[0] >> 48) & 1) == 1);
+    REQUIRE(lowered.instructions.size() == 3);
+    // Clamp the count before the signed high-word shift; the Star Fox translator test
+    // checks the result for counts on both sides of 32 and aliased destinations.
+    REQUIRE(lowered.instructions[0] ==
+            (0x3820000000070000ULL | 250 | (37ULL << 8) | (31ULL << 20) | (7ULL << 39)));
+    REQUIRE(((lowered.instructions[1] >> 8) & 0xff) == 68);
+    REQUIRE(((lowered.instructions[1] >> 20) & 0xff) == 250);
+    REQUIRE(((lowered.instructions[1] >> 48) & 1) == 1);
 }
 
 TEST_CASE("Ampere uniform multiply accepts an immediate addend", "[video_core][ampere]") {

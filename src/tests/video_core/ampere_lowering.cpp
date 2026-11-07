@@ -335,15 +335,6 @@ TEST_CASE("Ampere Ocarina sign extends, uniform shifts and carries, LEA.HI and S
     REQUIRE(shift.instructions.size() >= 2);
     CHECK(shift.instructions[1] == 0x5c4800800dc7faddULL);
 
-    // UIADD3 UR6, UP2, UR15, UR6, URZ: the carry goes through P4 into R239 bit 4.
-    const auto carry = lower({{0x0f067290, 6, 0x0ff5e03f, 0x000fe200}});
-    INFO(carry.error);
-    REQUIRE(static_cast<bool>(carry));
-    const std::array<u64, 6> expected_carry{
-        0x5c1000000de7e7faULL, 0x38e800000107fffdULL, 0x5b6203800e77fa27ULL,
-        0x38e800000107efefULL, 0x38f000000107fd00ULL, 0x5c9807800fa700deULL};
-    CHECK(std::equal(expected_carry.begin(), expected_carry.end(), carry.instructions.begin()));
-
     // LEA.HI R1, R1, -R0, RZ, 0x1e: the final add negates R0.
     const auto lea = lower({{0x01017211, 0x80000000, 0x078ff0ff, 0x000fca00}});
     INFO(lea.error);

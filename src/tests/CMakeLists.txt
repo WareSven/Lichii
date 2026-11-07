@@ -60,6 +60,7 @@ add_executable(tests
     video_core/async_shader_emission.cpp
     video_core/pipeline_build.cpp
     video_core/pipeline_eviction_policy.cpp
+    video_core/usage_tracker.cpp
     video_core/used_pipeline_cache.cpp
     video_core/mesh_pipeline_key.cpp
     video_core/mesh_pipeline_library.cpp
