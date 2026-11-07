@@ -1,0 +1,148 @@
+{
+  "schema": 1,
+  "recorded_date": "2026-11-07",
+  "destination": "WareSven/Lichii",
+  "original_fork_nx2": "71268a75e806a92f55c21f2577aaa19c6e9d6692",
+  "entry_branch": "codex/lichii-workspace",
+  "status": "source branch inventory; publication must be verified against remote refs",
+  "branches": [
+    {
+      "branch": "codex/baseline-test-causes",
+      "commit": "3b5f070c638ab76826adb89e000dd1cc412ad891",
+      "tree": "9e1edb0765a93ec7aa1fda37bdce85e0eebbb5ee",
+      "subject": "tests: release NUP readers and compare active scaled NV12 samples"
+    },
+    {
+      "branch": "codex/build-shader-first-use",
+      "commit": "e5780d3df1e853647171365b1538b5cdba2e6c5d",
+      "tree": "bd2d3300ffea6d31b2bd5e1741f6e2fa1344b83e",
+      "subject": "vulkan: validate shader warmup and join it before play on request"
+    },
+    {
+      "branch": "codex/build-shader-precompile",
+      "commit": "d34327ea14881735ba6be3d61456475f29005df7",
+      "tree": "b0c284b9cb5a877c781408e943608278d08317ea",
+      "subject": "vulkan: trial inline claims for held pipeline builds"
+    },
+    {
+      "branch": "codex/first-visit-upstream",
+      "commit": "94b1957e8bc1f9bf97f15097454f2e5ad6aaced7",
+      "tree": "9fcfd389d673e7f938a161d1dbbcc128387846d7",
+      "subject": "tests: include Catch matchers for sparse replay exception assertion"
+    },
+    {
+      "branch": "codex/mesh-unused-task-payload",
+      "commit": "51cfefeeccc90fe5ea922f402605836c3a1b3a99",
+      "tree": "dba7325e70cdad1081adc068e91e26bbf1cf6b77",
+      "subject": "tests: emit complete task and mesh payload fixtures"
+    },
+    {
+      "branch": "codex/nx2-compatibility-bench",
+      "commit": "a7a281757da390ce45070e772784e0333831bb25",
+      "tree": "df0288618341534fb5df421ce2f8bcbec19709ee",
+      "subject": "video_core: opt-in EDEN_NX2_ASYNC_DISCARD to skip native draws with unbuilt pipelines (#224)"
+    },
+    {
+      "branch": "codex/oot-cpu-lock",
+      "commit": "c102df10ad0d86f14949b53ca48a8608edf4b0ea",
+      "tree": "c1af69c3f5554d76b63817b7c0d5a7db15259125",
+      "subject": "Revert \"dynarmic: poll contended PAUSE spinlocks before retrying exchange\""
+    },
+    {
+      "branch": "codex/oot-exclusive-read-final",
+      "commit": "925c51115d3757585403870471e685ff00e71e18",
+      "tree": "6a434b016f82708b28a1b30d0f6782045d3df9bb",
+      "subject": "dynarmic: release scalar A64 read monitor before memory callbacks"
+    },
+    {
+      "branch": "codex/oot-exclusive-read-release",
+      "commit": "ea4d17c619858a9648204212ae75f2e430078047",
+      "tree": "1f25f4d9fd3be2af881aeb827baa1e5a71668008",
+      "subject": "Exercise Windows fastmem faults in exclusive-read experiment tests"
+    },
+    {
+      "branch": "codex/oot-first-use-upstream",
+      "commit": "80eb0620615ad375bfa31324553d0536e8d2a550",
+      "tree": "2f4a3e6684a9336f6ae294eca1e714ed3f981049",
+      "subject": "vulkan: define empty layouts for owned GPL descriptor slots"
+    },
+    {
+      "branch": "codex/oot-mesh-attribute-key",
+      "commit": "4eabb76a63336013b611e59105d4f143f410d5c0",
+      "tree": "c1af69c3f5554d76b63817b7c0d5a7db15259125",
+      "subject": "video_core: canonicalize unused vertex types in mesh pipeline keys"
+    },
+    {
+      "branch": "codex/oot-pipeline-retention",
+      "commit": "c5d23450fde5a8803eae6576aa6092382cb05ab8",
+      "tree": "8200ead4ce173c9d9f265db277e97e01460fe133",
+      "subject": "video_core: retain Switch 2 pipelines within the PR313 memory budget"
+    },
+    {
+      "branch": "codex/oot-used-pipeline-checkpoint",
+      "commit": "d34327ea14881735ba6be3d61456475f29005df7",
+      "tree": "b0c284b9cb5a877c781408e943608278d08317ea",
+      "subject": "vulkan: trial inline claims for held pipeline builds"
+    },
+    {
+      "branch": "codex/qt-shutdown-reentrance",
+      "commit": "71835214045b0fb6236846fd46946d8d354f5c92",
+      "tree": "5f5610933418abef3544fdd94a454109aad1ad7c",
+      "subject": "frontend: queue emulation-finished cleanup during shutdown"
+    },
+    {
+      "branch": "codex/static-cache-lifetime",
+      "commit": "a6d9787720153e6cd80f9715c0e77fe05e121a68",
+      "tree": "092103aaa51b181efbbdca633071ba051c1bc203",
+      "subject": "vulkan: retain the static pipeline cache path through device teardown"
+    },
+    {
+      "branch": "codex/switch2-pro-gl-gr",
+      "commit": "90d330e6899a5b8ebda958e9fea2fe6c14bd4d0f",
+      "tree": "478effa8e5171cbc6b87db1e2949dd4de39fcc24",
+      "subject": "tests: correct alternate input fixture and shared SDL mappings"
+    },
+    {
+      "branch": "codex/task-mesh-precompile",
+      "commit": "6fefc2d23dc184ef48b190bd9d51efebcb4d603a",
+      "tree": "548c2f209ee3c441ab5425c99b1c9ffd20486c43",
+      "subject": "vulkan: reuse task and mesh pipeline shader libraries"
+    },
+    {
+      "branch": "codex/texture-index-dominance",
+      "commit": "cf5b6a858dc0243dd3baf60961701a1ca2f8e5e5",
+      "tree": "cfce9752497ddcbc6bec9d3fcde3445adf604104",
+      "subject": "shader: don't track bindless handles through texture results or float math"
+    },
+    {
+      "branch": "codex/warm-authenticated-cb1",
+      "commit": "f417b6c2006b2246d709e3d1eb9ca33b40828fc2",
+      "tree": "4e0f2d6c718996db711962a5ef75e418cebb7c85",
+      "subject": "tests: separate BNSH fixture stage records from program slots"
+    },
+    {
+      "branch": "codex/warm-indirect-and-shutdown",
+      "commit": "688fed7b9fe9324dc6d5e90a0942aa0e9a29daf2",
+      "tree": "9720e4aa88705e706e5eebad181ef33c195b60e3",
+      "subject": "frontend: queue emulation-finished cleanup during shutdown"
+    },
+    {
+      "branch": "codex/warm-indirect-table",
+      "commit": "77b3787b8ae9bdc9e2d6d71a345325ddaedefe2d",
+      "tree": "3bab9eb150808b5ccfe811a7a0438e671cd7d4fd",
+      "subject": "shader warm: exclude programs needing uncaptured branch tables"
+    },
+    {
+      "branch": "codex/work-pipeline",
+      "commit": "89242ce8a7e1c23ab39c8b1ed6db35f145129f86",
+      "tree": "7ef9e4baaf6f18a6e4ad0af1242a7470303e11b4",
+      "subject": "tools: add evidence-backed local development pipeline"
+    }
+  ],
+  "notes": [
+    "Branch publication preserves each original commit and history.",
+    "No branch in this list implies gameplay approval or readiness to merge.",
+    "The entry branch combines94b195 with pipeline89242; its current SHA is supplied by Git.",
+    "Runtime caches, game data, captures and local evidence are not part of this inventory."
+  ]
+}
