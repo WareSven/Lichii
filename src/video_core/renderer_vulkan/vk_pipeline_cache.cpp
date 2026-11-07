@@ -1245,10 +1245,8 @@ void PipelineCache::StartComputeWarm(u64 title_id) {
             }
             file.read(reinterpret_cast<char*>(&entry.key), sizeof(entry.key));
             ++file_entries;
-            // Programs already in the disk cache were built at boot; leave them out.
-            if (!compute_cache.contains(entry.key)) {
-                entries->push_back(std::move(entry));
-            }
+            // Equal compute keys can still carry different captured constant environments.
+            entries->push_back(std::move(entry));
         }
         read_ok = file.tellg() == end;
     } catch (const std::exception& e) {
