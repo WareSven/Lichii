@@ -59,6 +59,26 @@ using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
 
 constexpr size_t NUM_STAGES = Maxwell::MaxShaderStage;
 
+bool ClaimInlinePipelines() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_PIPELINE_CLAIM_INLINE");
+        const bool claim = value != nullptr && value[0] == '1';
+        if (claim) {
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_PIPELINE_CLAIM_INLINE: held draws may claim queued builds");
+        }
+        return claim;
+    }();
+    return enabled;
+}
+
+bool TracePipelineWaits() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_PIPELINE_WAIT_TRACE");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
 // The stage of a program: task and mesh programs sit in the vertex and tessellation slots.
 VkShaderStageFlagBits StageFlag(const Shader::Info& info, VkShaderStageFlagBits slot_stage) {
     if (info.is_task) {
@@ -343,7 +363,10 @@ GraphicsPipeline::GraphicsPipeline(
         }
     }
 
-    auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,
+    const bool trace_job = TracePipelineWaits() && worker_thread != nullptr;
+    const auto queued = trace_job ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
+    auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics, trace_job, queued,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
         SCOPE_EXIT {
@@ -378,14 +401,25 @@ GraphicsPipeline::GraphicsPipeline(
         for (vk::ShaderModule& module : spv_modules) {
             module.reset();
         }
+        const auto elapsed = std::chrono::steady_clock::now() - begin;
         if (worker_only_build) {
-            const auto elapsed = std::chrono::steady_clock::now() - begin;
             static std::atomic<u32> logged{};
             if (elapsed > std::chrono::milliseconds{100} ||
                 (elapsed > std::chrono::milliseconds{2} && logged.fetch_add(1) < 400)) {
                 LOG_INFO(Render_Vulkan,
-                         "Nx2Perf async_pipelines: {:016x} worker emission and driver build {:.1f} ms",
+                         "Nx2Perf async_pipelines: {:016x} deferred emission and driver build {:.1f} ms",
                          key.Hash(), std::chrono::duration<double, std::milli>(elapsed).count());
+            }
+        }
+        if (trace_job) {
+            static std::atomic<u32> logged{};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 128) {
+                LOG_INFO(Render_Vulkan,
+                         "Nx2Perf pipeline_job: key={:016x} queue_to_start_ms={:.3f} "
+                         "emission_and_driver_ms={:.3f}",
+                         key.Hash(),
+                         std::chrono::duration<double, std::milli>(begin - queued).count(),
+                         std::chrono::duration<double, std::milli>(elapsed).count());
             }
         }
     }};
@@ -751,12 +785,28 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     if (!IsBuilt()) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
+            const bool claim_inline = ClaimInlinePipelines();
             const auto begin = std::chrono::steady_clock::now();
-            build->Wait(!worker_only_build);
-            hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                       std::chrono::steady_clock::now() - begin)
-                                       .count(),
+            // PR #321: claim a queued build instead of waiting behind unrelated FIFO jobs.
+            const auto result = build->Wait(claim_inline || !worker_only_build);
+            const auto elapsed = std::chrono::steady_clock::now() - begin;
+            hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count(),
                                    std::memory_order::relaxed);
+            if (TracePipelineWaits()) {
+                static std::atomic<u32> logged{};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 128) {
+                    const char* outcome = result == PipelineBuild::WaitResult::ClaimedHere
+                                              ? "claimed_here"
+                                          : result == PipelineBuild::WaitResult::AlreadyComplete
+                                              ? "already_complete"
+                                              : "other_executor";
+                    LOG_INFO(Render_Vulkan,
+                             "Nx2Perf pipeline_wait: key={:016x} claim_inline={} outcome={} "
+                             "hold_ms={:.3f}",
+                             key.Hash(), claim_inline, outcome,
+                             std::chrono::duration<double, std::milli>(elapsed).count());
+                }
+            }
         });
     }
     const bool is_rescaling{texture_cache.IsRescaling()};

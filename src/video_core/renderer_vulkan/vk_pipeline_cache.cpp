@@ -1487,8 +1487,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 }
 
 namespace {
-// Pipelines built on the GPU thread at run time (shader translation, and the SPIR-V unless a worker
-// emits it; the driver compile is on workers): the first 400 over 2 ms and every one over 100 ms
+// Pipelines built on the GPU thread at run time (shader translation, and the SPIR-V unless a deferred
+// job emits it; driver compilation is in those jobs): the first 400 over 2 ms and every one over 100 ms
 // are logged, and the totals every 10 s, to tell how much of the stutter on new content is
 // translation.
 void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_point begin,
@@ -1515,7 +1515,7 @@ void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_poi
         };
         LOG_INFO(Render_Vulkan,
                  "Runtime pipelines in the last 10 s: {} built, {:.1f} ms on the GPU thread "
-                 "({:.1f} ms of it graphics SPIR-V), {:.1f} ms graphics SPIR-V on workers, "
+                 "({:.1f} ms of it graphics SPIR-V), {:.1f} ms graphics SPIR-V in deferred jobs, "
                  "{:.1f} ms of draws held for unbuilt pipelines",
                  count, ms(total), ms(take(runtime_spirv_ns[0])), ms(take(runtime_spirv_ns[1])),
                  ms(GraphicsPipeline::TakeHoldTime()));

@@ -153,6 +153,73 @@ TEST_CASE("Pipeline destruction drains queued work before owner resources disapp
     REQUIRE(budget.Pending() == 0);
 }
 
+TEST_CASE("A held draw claims a queued pipeline once while unrelated compiler work is blocked",
+          "[video_core][async_draw][pipeline_build]") {
+    Common::ThreadWorker workers{1, "PipelineTest"};
+    std::promise<void> release_worker, worker_entered;
+    const auto worker_gate = release_worker.get_future().share();
+    workers.QueueWork([&] {
+        worker_entered.set_value();
+        worker_gate.wait();
+    });
+    worker_entered.get_future().wait();
+    int builds = 0;
+    int draw_input = 0;
+    PipelineBuild build{&workers, [&] {
+                            ++builds;
+                            draw_input = 42;
+                        }};
+    const auto result = build.Wait(true);
+    const int consumed = draw_input;
+    const auto repeated = build.Wait(true);
+    release_worker.set_value();
+    workers.WaitForRequests();
+    CHECK(result == PipelineBuild::WaitResult::ClaimedHere);
+    CHECK(repeated == PipelineBuild::WaitResult::AlreadyComplete);
+    CHECK(consumed == 42);
+    CHECK(builds == 1);
+}
+
+TEST_CASE("Inline pipeline failure releases captures and all competing draw waiters",
+          "[video_core][async_draw][pipeline_build]") {
+    for (const bool standard_exception : {false, true}) {
+        Common::ThreadWorker workers{1, "PipelineTest"};
+        EmissionBudget budget{1};
+        std::promise<void> release_worker, worker_entered, release_build, build_entered;
+        const auto worker_gate = release_worker.get_future().share();
+        const auto build_gate = release_build.get_future().share();
+        workers.QueueWork([&] {
+            worker_entered.set_value();
+            worker_gate.wait();
+        });
+        worker_entered.get_future().wait();
+        int builds = 0;
+        PipelineBuild build{&workers, [&, reservation = std::shared_ptr{budget.TryAcquire(true)}] {
+                                ++builds;
+                                build_entered.set_value();
+                                build_gate.wait();
+                                if (standard_exception) {
+                                    throw std::runtime_error("inline emission failed");
+                                }
+                                throw 42;
+                            }};
+        auto claimant = std::async(std::launch::async, [&] { return build.Wait(true); });
+        build_entered.get_future().wait();
+        auto waiter = std::async(std::launch::async, [&] { return build.Wait(true); });
+        release_build.set_value();
+        const auto owner_result = claimant.get();
+        const auto waiter_result = waiter.get();
+        release_worker.set_value();
+        workers.WaitForRequests();
+        CHECK(owner_result == PipelineBuild::WaitResult::ClaimedHere);
+        CHECK(waiter_result != PipelineBuild::WaitResult::ClaimedHere);
+        CHECK(build.IsBuilt());
+        CHECK(build.Failed());
+        CHECK(builds == 1);
+        CHECK(budget.Pending() == 0);
+    }
+}
+
 TEST_CASE("Pipeline destruction waits for a running callback and its cleanup",
           "[video_core][async_draw][pipeline_build]") {
     Common::ThreadWorker workers{1, "PipelineTest"};

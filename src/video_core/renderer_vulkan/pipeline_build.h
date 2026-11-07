@@ -65,24 +65,25 @@ class PipelineBuild {
     struct State {
         explicit State(std::function<void()> task_) : task{std::move(task_)} {}
 
-        void Run() noexcept {
+        bool Run() noexcept {
             if (claimed.exchange(true)) {
-                return;
+                return false;
             }
             try {
                 task();
             } catch (const std::exception& exception) {
                 failed = true;
-                LOG_ERROR(Render_Vulkan, "Graphics pipeline worker failed: {}", exception.what());
+                LOG_ERROR(Render_Vulkan, "Graphics pipeline build failed: {}", exception.what());
             } catch (...) {
                 failed = true;
                 LOG_ERROR(Render_Vulkan,
-                          "Graphics pipeline worker failed with an unknown exception");
+                          "Graphics pipeline build failed with an unknown exception");
             }
             task = {};
             std::scoped_lock lock{mutex};
             complete.store(true, std::memory_order_release);
             condition.notify_all();
+            return true;
         }
 
         std::function<void()> task;
@@ -94,6 +95,12 @@ class PipelineBuild {
     };
 
 public:
+    enum class WaitResult {
+        AlreadyComplete,
+        ClaimedHere,
+        OtherExecutor,
+    };
+
     PipelineBuild(Common::ThreadWorker* workers, std::function<void()> task)
         : state{std::make_shared<State>(std::move(task))} {
         if (workers) {
@@ -115,14 +122,16 @@ public:
         return IsBuilt() && state->failed;
     }
 
-    void Wait(bool may_build = false) const {
+    WaitResult Wait(bool may_build = false) const {
         const auto shared = state;
-        if (may_build) {
-            shared->Run();
-        }
+        const bool already_complete = shared->complete.load(std::memory_order_acquire);
+        const bool claimed_here = may_build && shared->Run();
         std::unique_lock lock{shared->mutex};
         shared->condition.wait(lock,
                                [&] { return shared->complete.load(std::memory_order_acquire); });
+        return claimed_here       ? WaitResult::ClaimedHere
+               : already_complete ? WaitResult::AlreadyComplete
+                                  : WaitResult::OtherExecutor;
     }
 
     PipelineBuild(const PipelineBuild&) = delete;
