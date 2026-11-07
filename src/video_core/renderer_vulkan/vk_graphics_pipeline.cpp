@@ -19,6 +19,9 @@
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 
 #include "common/bit_field.h"
+#include "common/cityhash.h"
+#include "video_core/renderer_vulkan/graphics_pipeline_state.h"
+#include "video_core/renderer_vulkan/pipeline_trace.h"
 #include "common/scope_exit.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
@@ -91,17 +94,6 @@ bool TracePipelineWaits() {
     return enabled;
 }
 
-// The stage of a program: task and mesh programs sit in the vertex and tessellation slots.
-VkShaderStageFlagBits StageFlag(const Shader::Info& info, VkShaderStageFlagBits slot_stage) {
-    if (info.is_task) {
-        return VK_SHADER_STAGE_TASK_BIT_EXT;
-    }
-    if (info.is_mesh) {
-        return VK_SHADER_STAGE_MESH_BIT_EXT;
-    }
-    return slot_stage;
-}
-
 // The stage of a pipeline stage slot (vertex, tessellation control and evaluation, geometry,
 // fragment).
 VkShaderStageFlagBits SlotStage(size_t index) {
@@ -125,7 +117,7 @@ DescriptorLayoutBuilder MakeBuilder(const Device& device, std::span<const Shader
             VK_SHADER_STAGE_GEOMETRY_BIT,
             VK_SHADER_STAGE_FRAGMENT_BIT,
         };
-        builder.Add(infos[index], StageFlag(infos[index], stages.at(index)));
+        builder.Add(infos[index], GraphicsStageFlag(infos[index], stages.at(index)));
     }
     return builder;
 }
@@ -371,7 +363,7 @@ GraphicsPipeline::GraphicsPipeline(
         size_t descriptor_offset{};
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
             DescriptorLayoutBuilder stage_builder{device};
-            stage_builder.Add(stage_infos[stage], StageFlag(stage_infos[stage], SlotStage(stage)));
+            stage_builder.Add(stage_infos[stage], GraphicsStageFlag(stage_infos[stage], SlotStage(stage)));
             stage_descriptor_offsets[stage] = descriptor_offset;
             descriptor_offset +=
                 sizeof(DescriptorUpdateEntry) * NumDescriptorEntries(stage_infos[stage]);
@@ -391,7 +383,8 @@ GraphicsPipeline::GraphicsPipeline(
             }
         }
         pipeline_layout =
-            DescriptorLayoutBuilder{device}.CreateIndependentPipelineLayout(set_layouts, true);
+            DescriptorLayoutBuilder{device}.CreateIndependentPipelineLayout(set_layouts, true,
+                                                                            IsMeshPipeline());
     } else {
         DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos)};
         uses_push_descriptor = builder.CanUsePushDescriptor();
@@ -429,9 +422,20 @@ GraphicsPipeline::GraphicsPipeline(
     auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics, trace_job, queued,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
+        bool completed{};
         SCOPE_EXIT {
             if (shader_notify) {
                 shader_notify->MarkShaderComplete();
+            }
+            if (TracePipeline(key.Hash())) {
+                LOG_INFO(Render_Vulkan,
+                         "Nx2Perf pipeline_target: key={:016x} event=build_complete "
+                         "synchronous={} success={} mesh={} gpl={} linked={} libraries_only={} "
+                         "emission_and_driver_ms={:.3f}",
+                         key.Hash(), build_workers == nullptr, completed, IsMeshPipeline(),
+                         library_cache != nullptr, linked, libraries_only,
+                         std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - begin).count());
             }
         };
         try {
@@ -541,6 +545,7 @@ GraphicsPipeline::GraphicsPipeline(
                          std::chrono::duration<double, std::milli>(elapsed).count());
             }
         }
+        completed = libraries_only || static_cast<bool>(pipeline);
     }};
     std::array<bool, NUM_STAGES> present_stages{};
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
@@ -929,9 +934,10 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             if (library_cache) {
                 library_cache->RecordHeldDraw(elapsed);
             }
-            if (TracePipelineWaits()) {
+            const bool target_trace = TracePipeline(key.Hash());
+            if (TracePipelineWaits() || target_trace) {
                 static std::atomic<u32> logged{};
-                if (logged.fetch_add(1, std::memory_order_relaxed) < 128) {
+                if (target_trace || logged.fetch_add(1, std::memory_order_relaxed) < 128) {
                     const char* outcome = result == PipelineBuild::WaitResult::ClaimedHere
                                               ? "claimed_here"
                                           : result == PipelineBuild::WaitResult::AlreadyComplete
@@ -1140,7 +1146,9 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
     if (!vertex_binding_divisors.empty()) {
         s.vertex_input_ci.pNext = &s.input_divisor_ci;
     }
-    const bool has_tess_stages = spv_modules[1] || spv_modules[2];
+    const bool has_tess_stages = HasTessellationStages(
+        static_cast<bool>(spv_modules[1]), stage_infos[1],
+        static_cast<bool>(spv_modules[2]), stage_infos[2]);
     s.has_tess_stages = has_tess_stages;
     auto input_assembly_topology = MaxwellToVK::PrimitiveTopology(device, key.state.topology);
     if (input_assembly_topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {
@@ -1448,13 +1456,7 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
     if (is_mesh) {
         // Mesh pipelines have no vertex input or input assembly.
         dynamic_states.erase(std::remove_if(dynamic_states.begin(), dynamic_states.end(),
-                                            [](VkDynamicState state) {
-                                                return state == VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY_EXT ||
-                                                       state == VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE_EXT ||
-                                                       state == VK_DYNAMIC_STATE_VERTEX_INPUT_EXT ||
-                                                       state == VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE_EXT ||
-                                                       state == VK_DYNAMIC_STATE_PATCH_CONTROL_POINTS_EXT;
-                                            }),
+                                            IsVertexInputDynamicState),
                              dynamic_states.end());
     }
     s.dynamic_state_ci = {
@@ -1488,7 +1490,7 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass, bool fast)
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .pNext = nullptr,
                 .flags = 0,
-                .stage = StageFlag(stage_infos[stage],
+                .stage = GraphicsStageFlag(stage_infos[stage],
                                    MaxwellToVK::ShaderStage(Shader::StageFromIndex(stage))),
                 .module = *spv_modules[stage],
                 .pName = "main",
@@ -1566,7 +1568,8 @@ std::string GraphicsPipeline::ShaderLibraryKey(GplPart part, const PipelineState
     // Same render pass handle = same formats and samples (the render pass cache keeps them).
     key_writer.Add(render_pass);
     key_writer.Add(static_cast<u32>(LibraryFlags()));
-    const VkPushConstantRange push_range{DescriptorLayoutBuilder{device}.PushConstantRange()};
+    const VkPushConstantRange push_range{
+        DescriptorLayoutBuilder{device}.PushConstantRange(IsMeshPipeline())};
     key_writer.Add(push_range.stageFlags);
     key_writer.Add(push_range.offset);
     key_writer.Add(push_range.size);
@@ -1576,7 +1579,7 @@ std::string GraphicsPipeline::ShaderLibraryKey(GplPart part, const PipelineState
         }
         key_writer.Add(static_cast<u32>(stage));
         key_writer.Add(static_cast<u32>(spv_modules[stage] ? 1 : 0));
-        key_writer.Add(static_cast<u32>(StageFlag(stage_infos[stage], SlotStage(stage))));
+        key_writer.Add(static_cast<u32>(GraphicsStageFlag(stage_infos[stage], SlotStage(stage))));
         key_writer.Add(spirv_hashes[stage]);
         key_writer.AddBytes(stage_set_signatures[stage]);
     }
@@ -1672,7 +1675,7 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
             continue;
         }
         DescriptorLayoutBuilder builder{device};
-        builder.Add(stage_infos[stage], StageFlag(stage_infos[stage], SlotStage(stage)));
+        builder.Add(stage_infos[stage], GraphicsStageFlag(stage_infos[stage], SlotStage(stage)));
         // Each slot belongs to one library, even when that stage has no resources.
         // The other library leaves it null; never leave it null in both libraries.
         library.set_layouts.push_back(builder.Empty() ? CreateEmptySetLayout(device)
@@ -1685,7 +1688,7 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .stage = StageFlag(stage_infos[stage],
+            .stage = GraphicsStageFlag(stage_infos[stage],
                                MaxwellToVK::ShaderStage(Shader::StageFromIndex(stage))),
             .module = *spv_modules[stage],
             .pName = "main",
@@ -1693,7 +1696,8 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
         });
     }
     library.layout =
-        DescriptorLayoutBuilder{device}.CreateIndependentPipelineLayout(set_layouts, true);
+        DescriptorLayoutBuilder{device}.CreateIndependentPipelineLayout(set_layouts, true,
+                                                                        IsMeshPipeline());
     const bool pre_rasterization = part == GplPart::PreRasterization;
     const VkGraphicsPipelineLibraryCreateInfoEXT library_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
@@ -1729,16 +1733,17 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
 
 vk::Pipeline GraphicsPipeline::LinkLibraries(VkRenderPass render_pass, bool optimized) {
     const std::array<VkPipeline, 4> libraries{
-        *vertex_input_library,
+        vertex_input_library ? *vertex_input_library : VK_NULL_HANDLE,
         *shader_libraries[0]->pipeline,
         *shader_libraries[1]->pipeline,
         *fragment_output_library,
     };
+    const auto linked_libraries = LinkedGraphicsLibraries(libraries, IsMeshPipeline());
     const VkPipelineLibraryCreateInfoKHR link_ci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR,
         .pNext = nullptr,
-        .libraryCount = static_cast<u32>(libraries.size()),
-        .pLibraries = libraries.data(),
+        .libraryCount = static_cast<u32>(linked_libraries.size()),
+        .pLibraries = linked_libraries.data(),
     };
     VkPipelineCreateFlags flags{};
     if (device.IsKhrPipelineExecutablePropertiesEnabled() && Settings::values.renderer_debug.GetValue()) {
@@ -1793,9 +1798,32 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
         // The log names a library after its vertex (or fragment) program.
         const u64 name = part == GplPart::PreRasterization ? key.unique_hashes[1]
                                                            : key.unique_hashes[5];
+        const std::string library_key = ShaderLibraryKey(part, states, render_pass);
+        GplLookupInfo lookup;
         shader_libraries[index] = library_cache->GetOrCreate(
-            part, ShaderLibraryKey(part, states, render_pass),
-            [&] { return MakeShaderLibrary(part, states, render_pass); }, name);
+            part, library_key, [&] { return MakeShaderLibrary(part, states, render_pass); }, name,
+            key.Hash(), lookup);
+        if (TracePipeline(key.Hash())) {
+            const auto digest = Common::CityHash128(library_key.data(), library_key.size());
+            const char* result = lookup.result == GplLookupInfo::Result::Built ? "built"
+                               : lookup.result == GplLookupInfo::Result::Waited ? "waited" : "hit";
+            LOG_INFO(Render_Vulkan,
+                     "Nx2Perf pipeline_target: key={:016x} event=library part={} "
+                     "library_key={:016x}{:016x} result={} success={} producer={:016x}",
+                     key.Hash(), static_cast<u32>(part), digest[0], digest[1], result,
+                     shader_libraries[index] != nullptr, lookup.producer_pipeline);
+            for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+                if (InPart(part, stage) && spv_modules[stage]) {
+                    LOG_INFO(Render_Vulkan,
+                             "Nx2Perf pipeline_target: key={:016x} event=library_stage part={} "
+                             "slot={} stage={} native_key={:016x} spirv={:016x}{:016x}",
+                             key.Hash(), static_cast<u32>(part), stage,
+                             static_cast<u32>(GraphicsStageFlag(stage_infos[stage], SlotStage(stage))),
+                             key.unique_hashes[stage + 1], spirv_hashes[stage][0],
+                             spirv_hashes[stage][1]);
+                }
+            }
+        }
         if (!shader_libraries[index]) {
             return false;
         }
@@ -1809,27 +1837,29 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
         .pNext = nullptr,
         .flags = VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT,
     };
-    vertex_input_library = device.GetLogical().CreateGraphicsPipeline({
-        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = &vertex_input_ci,
-        .flags = LibraryFlags(),
-        .stageCount = 0,
-        .pStages = nullptr,
-        .pVertexInputState = &states.vertex_input_ci,
-        .pInputAssemblyState = &states.input_assembly_ci,
-        .pTessellationState = nullptr,
-        .pViewportState = nullptr,
-        .pRasterizationState = nullptr,
-        .pMultisampleState = nullptr,
-        .pDepthStencilState = nullptr,
-        .pColorBlendState = nullptr,
-        .pDynamicState = &states.dynamic_state_ci,
-        .layout = VK_NULL_HANDLE,
-        .renderPass = VK_NULL_HANDLE,
-        .subpass = 0,
-        .basePipelineHandle = nullptr,
-        .basePipelineIndex = 0,
-    }, *pipeline_cache);
+    if (!states.is_mesh) {
+        vertex_input_library = device.GetLogical().CreateGraphicsPipeline({
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext = &vertex_input_ci,
+            .flags = LibraryFlags(),
+            .stageCount = 0,
+            .pStages = nullptr,
+            .pVertexInputState = &states.vertex_input_ci,
+            .pInputAssemblyState = &states.input_assembly_ci,
+            .pTessellationState = nullptr,
+            .pViewportState = nullptr,
+            .pRasterizationState = nullptr,
+            .pMultisampleState = nullptr,
+            .pDepthStencilState = nullptr,
+            .pColorBlendState = nullptr,
+            .pDynamicState = &states.dynamic_state_ci,
+            .layout = VK_NULL_HANDLE,
+            .renderPass = VK_NULL_HANDLE,
+            .subpass = 0,
+            .basePipelineHandle = nullptr,
+            .basePipelineIndex = 0,
+        }, *pipeline_cache);
+    }
     const VkGraphicsPipelineLibraryCreateInfoEXT fragment_output_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
         .pNext = nullptr,
@@ -1870,7 +1900,8 @@ void GraphicsPipeline::FallBackToMonolithic(VkRenderPass render_pass) {
             stage_set_layouts[stage] ? *stage_set_layouts[stage] : *empty_set_layout;
     }
     pipeline_layout =
-        DescriptorLayoutBuilder{device}.CreateIndependentPipelineLayout(set_layouts, false);
+        DescriptorLayoutBuilder{device}.CreateIndependentPipelineLayout(set_layouts, false,
+                                                                        IsMeshPipeline());
     shader_libraries = {};
     vertex_input_library.reset();
     fragment_output_library.reset();

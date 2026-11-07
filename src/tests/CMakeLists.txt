@@ -62,6 +62,7 @@ add_executable(tests
     video_core/pipeline_eviction_policy.cpp
     video_core/used_pipeline_cache.cpp
     video_core/mesh_pipeline_key.cpp
+    video_core/mesh_pipeline_library.cpp
     video_core/pipeline_optimization.cpp
     video_core/spirv_atomic_retry.cpp
     video_core/spirv_storage_alignment.cpp

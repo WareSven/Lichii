@@ -244,17 +244,21 @@ public:
         });
     }
 
-    VkPushConstantRange PushConstantRange() const {
+    VkPushConstantRange PushConstantRange(bool mesh_pipeline = false) const {
+        return MakePushConstantRange(is_compute, uses_mesh || mesh_pipeline);
+    }
+
+    static VkPushConstantRange MakePushConstantRange(bool compute, bool mesh_pipeline) {
         using Shader::Backend::SPIRV::RenderAreaLayout;
         using Shader::Backend::SPIRV::RescalingLayout;
-        const u32 size_offset = is_compute ? sizeof(RescalingLayout::down_factor) : 0u;
+        const u32 size_offset = compute ? sizeof(RescalingLayout::down_factor) : 0u;
         return VkPushConstantRange{
             .stageFlags = static_cast<VkShaderStageFlags>(
-                is_compute ? VK_SHADER_STAGE_COMPUTE_BIT
-                           : (uses_mesh ? VK_SHADER_STAGE_ALL_GRAPHICS |
-                                              VK_SHADER_STAGE_TASK_BIT_EXT |
-                                              VK_SHADER_STAGE_MESH_BIT_EXT
-                                        : VK_SHADER_STAGE_ALL_GRAPHICS)),
+                compute ? VK_SHADER_STAGE_COMPUTE_BIT
+                        : (mesh_pipeline ? VK_SHADER_STAGE_ALL_GRAPHICS |
+                                               VK_SHADER_STAGE_TASK_BIT_EXT |
+                                               VK_SHADER_STAGE_MESH_BIT_EXT
+                                         : VK_SHADER_STAGE_ALL_GRAPHICS)),
             .offset = 0,
             .size = static_cast<u32>(sizeof(RescalingLayout)) - size_offset +
                     static_cast<u32>(sizeof(RenderAreaLayout)),
@@ -264,8 +268,9 @@ public:
     /// Graphics pipeline libraries (EDEN_NX2_GPL): one set per stage, set index = stage index,
     /// null only where the stage is not part of the library.
     vk::PipelineLayout CreateIndependentPipelineLayout(
-        std::span<const VkDescriptorSetLayout> set_layouts, bool independent_sets) const {
-        const VkPushConstantRange range{PushConstantRange()};
+        std::span<const VkDescriptorSetLayout> set_layouts, bool independent_sets,
+        bool mesh_pipeline = false) const {
+        const VkPushConstantRange range{PushConstantRange(mesh_pipeline)};
         return device->GetLogical().CreatePipelineLayout({
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext = nullptr,

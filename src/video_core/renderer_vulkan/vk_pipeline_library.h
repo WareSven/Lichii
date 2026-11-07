@@ -23,8 +23,8 @@ namespace Vulkan {
 
 // Graphics pipeline libraries (EDEN_NX2_GPL=1, VK_EXT_graphics_pipeline_library).
 //
-// A pipeline is linked from four parts: vertex input, pre-rasterization shaders, fragment shader
-// and fragment output. The two shader parts are what the driver spends seconds on; they are built
+// A pipeline is linked from vertex input (omitted for mesh pipelines), pre-rasterization shaders,
+// fragment shader and fragment output. The two shader parts are built
 // once per shader (and the little state the driver bakes into them) and shared by every pipeline
 // that uses that shader, whatever its partner stage. The vertex input and fragment output parts
 // are cheap and built per pipeline. A new pipeline whose shaders were seen before costs a link
@@ -59,6 +59,12 @@ bool GplOptimizeEnabled();
 enum class GplPart : u32 {
     PreRasterization = 0,
     Fragment = 1,
+};
+
+struct GplLookupInfo {
+    enum class Result { Built, Hit, Waited };
+    Result result{Result::Built};
+    u64 producer_pipeline{};
 };
 
 /// A cached shader library and the layout objects it was created with.
@@ -105,7 +111,8 @@ public:
     /// waited for when another thread is building it. Null when its build failed (a failed key
     /// is not retried). `name` (a shader hash) is only for the log.
     std::shared_ptr<const GplLibrary> GetOrCreate(GplPart part, const std::string& key,
-                                                  const Builder& build, u64 name);
+                                                 const Builder& build, u64 name,
+                                                 u64 pipeline_hash, GplLookupInfo& lookup);
 
     /// While set on a thread, libraries it builds are not kept in the cache (the graphics
     /// warm-up: only the driver's disk cache keeps them, 60,000 kept libraries would not fit).
@@ -124,6 +131,7 @@ private:
         std::condition_variable condition;
         bool done{};
         std::shared_ptr<const GplLibrary> library;
+        u64 producer_pipeline{};
     };
 
     std::mutex mutex;

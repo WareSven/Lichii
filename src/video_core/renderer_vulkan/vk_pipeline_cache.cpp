@@ -46,6 +46,7 @@
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
+#include "video_core/renderer_vulkan/pipeline_trace.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
@@ -975,6 +976,11 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                              (used_pipelines.empty() ? queued_graphics < MaxPipelinesWithoutUsedList
                                                      : used_pipelines.contains(hash));
         const auto action = graphics_load_plan.Add(disk_pipelines, hash, preload);
+        if (TracePipeline(hash)) {
+            LOG_INFO(Render_Vulkan,
+                     "Nx2Perf pipeline_target: key={:016x} event=boot_admission action={} preload={}",
+                     hash, static_cast<u32>(action), preload);
+        }
         if (action == GraphicsPipelineLoadAction::Duplicate) {
             return;
         }
@@ -1022,6 +1028,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             }
             auto pipeline{CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs),
                                                  state.statistics.get(), false)};
+
+            if (TracePipeline(key.Hash())) {
+                LOG_INFO(Render_Vulkan,
+                         "Nx2Perf pipeline_target: key={:016x} event=boot_result success={}",
+                         key.Hash(), pipeline && !pipeline->Failed());
+            }
 
             std::scoped_lock lock{state.mutex};
             // A failed one is left out, as in the background prebuild, so the first draw that
@@ -1594,6 +1606,12 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     }
     if (used_this_session.insert(pipeline.get()).second) {
         used_pipeline_checkpoint.MarkDirty();
+        if (TracePipeline(graphics_key.Hash())) {
+            LOG_INFO(Render_Vulkan,
+                     "Nx2Perf pipeline_target: key={:016x} event=first_runtime_lookup "
+                     "new_entry={} ready={} failed={}",
+                     graphics_key.Hash(), is_new, pipeline->IsBuilt(), pipeline->Failed());
+        }
     }
     if (current_pipeline) {
         current_pipeline->AddTransition(pipeline.get());
@@ -1755,6 +1773,11 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::unique_ptr<EmissionBudget::Reservation> reservation, bool libraries_only) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
+    if (TracePipeline(hash)) {
+        LOG_INFO(Render_Vulkan,
+                 "Nx2Perf pipeline_target: key={:016x} event=build_begin runtime={} libraries_only={}",
+                 hash, build_in_parallel, libraries_only);
+    }
     size_t env_index{0};
     std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
     const bool uses_vertex_a{key.unique_hashes[0] != 0};
@@ -1856,8 +1879,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
         }
     }
-    // Graphics pipeline libraries (EDEN_NX2_GPL). Left on the monolithic route: task and mesh
-    // pipelines, transform feedback, a static rasterizer discard, and stages whose texture or
+    // Graphics pipeline libraries (EDEN_NX2_GPL). Left on the monolithic route:
+    // transform feedback, a static rasterizer discard, and stages whose texture or
     // image counts do not fit the split rescaling bits.
     const bool use_libraries = [&] {
         if (!device.IsExtGraphicsPipelineLibrarySupported() || key.state.xfb_enabled != 0 ||
@@ -1877,9 +1900,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 continue;
             }
             const Shader::IR::Program& program{programs[index]};
-            if (program.stage == Shader::Stage::Task || program.stage == Shader::Stage::Mesh) {
-                return false;
-            }
             const bool fragment = index + 1 == Maxwell::MaxShaderProgram;
             (fragment ? fragment_textures : pre_textures) += program.info.texture_descriptors.size();
             (fragment ? fragment_images : pre_images) += program.info.image_descriptors.size();

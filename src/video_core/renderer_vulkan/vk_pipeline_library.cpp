@@ -39,7 +39,8 @@ bool GplOptimizeEnabled() {
 }
 
 std::shared_ptr<const GplLibrary> GraphicsPipelineLibraryCache::GetOrCreate(
-    GplPart part, const std::string& key, const Builder& build, u64 name) {
+    GplPart part, const std::string& key, const Builder& build, u64 name,
+    u64 pipeline_hash, GplLookupInfo& lookup) {
     const size_t index = static_cast<size_t>(part);
     std::shared_ptr<Entry> entry;
     bool owner = false;
@@ -48,13 +49,17 @@ std::shared_ptr<const GplLibrary> GraphicsPipelineLibraryCache::GetOrCreate(
         auto [it, inserted] = entries.try_emplace(key);
         if (inserted) {
             it->second = std::make_shared<Entry>();
+            it->second->producer_pipeline = pipeline_hash;
             owner = true;
         }
         entry = it->second;
     }
+    lookup.producer_pipeline = entry->producer_pipeline;
+    lookup.result = owner ? GplLookupInfo::Result::Built : GplLookupInfo::Result::Hit;
     if (!owner) {
         std::unique_lock lock{entry->mutex};
         if (!entry->done) {
+            lookup.result = GplLookupInfo::Result::Waited;
             // Another worker is building the same library: wait for it instead of building it
             // twice.
             waited[index].fetch_add(1, std::memory_order_relaxed);
