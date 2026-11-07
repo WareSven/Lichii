@@ -60,12 +60,12 @@ std::vector<u8> GraphicsControl() {
 
 std::vector<u8> GraphicsArchive(bool bahs) {
     constexpr size_t CodeOffset = 768;
-    constexpr size_t ControlOffset = 408;
+    const size_t control_offset = bahs ? 408 : 448;
     std::vector<u8> bytes(CodeOffset + 512);
     const auto allocation = GraphicsAllocation();
     const auto control = GraphicsControl();
     std::memcpy(bytes.data() + CodeOffset, allocation.data(), allocation.size());
-    std::memcpy(bytes.data() + ControlOffset, control.data(), control.size());
+    std::memcpy(bytes.data() + control_offset, control.data(), control.size());
     if (bahs) {
         std::memcpy(bytes.data(), "BAHS", 4);
         Store<u32>(bytes, 4, 11);
@@ -92,11 +92,11 @@ std::vector<u8> GraphicsArchive(bool bahs) {
         Store<u32>(bytes, 0x7c, 1);
         Store<u64>(bytes, 0x80, 256);
         Store<u64>(bytes, 272, 320);
-        Store<u64>(bytes, 328, 352);
-        Store<u64>(bytes, 360, ControlOffset);
-        Store<u64>(bytes, 368, CodeOffset);
-        Store<u32>(bytes, 376, 512);
-        Store<u32>(bytes, 380, 108);
+        Store<u64>(bytes, 328, 384);
+        Store<u64>(bytes, 392, control_offset);
+        Store<u64>(bytes, 400, CodeOffset);
+        Store<u32>(bytes, 408, 512);
+        Store<u32>(bytes, 412, 108);
     }
     return bytes;
 }
