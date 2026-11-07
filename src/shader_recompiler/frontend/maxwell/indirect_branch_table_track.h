@@ -4,6 +4,7 @@
 #pragma once
 
 #include <optional>
+#include <span>
 
 #include "common/common_types.h"
 #include "shader_recompiler/environment.h"
@@ -21,6 +22,10 @@ struct IndirectBranchTableInfo {
 };
 
 std::optional<IndirectBranchTableInfo> TrackIndirectBranchTable(Environment& env, Location brx_pos,
+                                                                Location block_begin);
+
+std::optional<IndirectBranchTableInfo> TrackIndirectBranchTable(std::span<const u64> code,
+                                                                Location brx_pos,
                                                                 Location block_begin);
 
 } // namespace Shader::Maxwell

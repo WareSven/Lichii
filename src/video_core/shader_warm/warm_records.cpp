@@ -10,7 +10,10 @@
 #include "common/cityhash.h"
 #include "shader_recompiler/frontend/ampere/instruction.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
+#include "shader_recompiler/frontend/ampere/program_address_map.h"
 #include "shader_recompiler/frontend/ampere/program_capture.h"
+#include "shader_recompiler/frontend/maxwell/decode.h"
+#include "shader_recompiler/frontend/maxwell/indirect_branch_table_track.h"
 #include "video_core/shader_warm/warm_records.h"
 
 namespace VideoCommon::ShaderWarm {
@@ -87,6 +90,84 @@ size_t TailSize(u32 stage) {
 }
 
 } // Anonymous namespace
+
+std::optional<ProgramData> ReadProgramData(std::span<const u8> allocation,
+                                           std::span<const u8> control, bool graphics) {
+    if (control.size() < 0x48 || Get<u32>(control, 0) != 0x98761234 ||
+        Get<u32>(control, 4) != 0xc9) {
+        return std::nullopt;
+    }
+    const size_t instructions = Get<u32>(control, 0x38);
+    const size_t constants_begin = Get<u32>(control, 0x40);
+    const size_t constants_end = Get<u32>(control, 0x44);
+    if (instructions <= (graphics ? 128U : 0U) || instructions % 16 != 0 ||
+        constants_begin % 16 != 0 || constants_end % 4 != 0 || instructions > constants_begin ||
+        constants_begin > constants_end || constants_end > allocation.size()) {
+        return std::nullopt;
+    }
+    return ProgramData{allocation.first(instructions),
+                       allocation.subspan(constants_begin, constants_end - constants_begin)};
+}
+
+std::optional<std::string> ValidateIndirectBranchTables(const LoweredCode& lowered,
+                                                        std::span<const u8> constant_buffer1) {
+    if (!lowered.requires_captured_indirect_table) {
+        return std::nullopt;
+    }
+    if (lowered.code.size() % sizeof(u64) != 0) {
+        return "Incomplete lowered code";
+    }
+    std::vector<u64> words(lowered.code.size() / sizeof(u64));
+    std::memcpy(words.data(), lowered.code.data(), lowered.code.size());
+    if (!Shader::Ampere::HasNativeAddressMap(words)) {
+        return "Missing native address map";
+    }
+    const u64 count = words[words.size() - 2];
+    if (count == 0 || count > 65536 || count + 12 >= words.size()) {
+        return "Invalid native address map extent";
+    }
+    const size_t map_start = words.size() - static_cast<size_t>(count) - 2;
+    bool found_branch = false;
+    try {
+        for (size_t index = 10; index + 1 < map_start; ++index) {
+            if (index % 4 == 0) {
+                continue;
+            }
+            const auto opcode = Shader::Maxwell::Decode(words[index]);
+            if (opcode != Shader::Maxwell::Opcode::BRX && opcode != Shader::Maxwell::Opcode::JMX) {
+                continue;
+            }
+            found_branch = true;
+            const u32 pc = static_cast<u32>(index * sizeof(u64));
+            const auto table = Shader::Maxwell::TrackIndirectBranchTable(
+                words, Shader::Maxwell::Location{pc}, Shader::Maxwell::Location{80});
+            if (!table) {
+                return "Indirect branch table cannot be tracked";
+            }
+            const u64 end = u64{table->cbuf_offset} + u64{table->num_entries} * 4;
+            if (table->cbuf_index != 1 || table->cbuf_offset % 4 != 0 || table->num_entries == 0 ||
+                end > constant_buffer1.size()) {
+                return "Indirect branch table is outside authenticated CB1";
+            }
+            for (u32 entry = 0; entry < table->num_entries; ++entry) {
+                u32 target = Get<u32>(constant_buffer1, table->cbuf_offset + size_t{entry} * 4);
+                if (opcode == Shader::Maxwell::Opcode::BRX) {
+                    target += pc;
+                }
+                target += static_cast<u32>(table->branch_offset) + 8;
+                if (!Shader::Ampere::NativeProgramAddress(words, target)) {
+                    return "Authenticated indirect branch target is outside captured code";
+                }
+            }
+        }
+    } catch (const std::exception&) {
+        return "Indirect branch table analysis failed";
+    }
+    if (!found_branch) {
+        return "Captured indirect branch is missing from lowered code";
+    }
+    return std::nullopt;
+}
 
 std::optional<std::string> LowerProgram(std::span<const u8> program, bool graphics,
                                         LoweredCode& out) {
@@ -186,18 +267,27 @@ std::optional<ComputeControl> ReadComputeControl(std::span<const u8> control) {
 }
 
 std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& control,
-                             ComputeKey& key) {
-    if (lowered.requires_captured_indirect_table) {
-        throw std::invalid_argument("Warm program requires a captured indirect branch table");
+                             ComputeKey& key, std::span<const u8> constant_buffer1) {
+    if (const auto error = ValidateIndirectBranchTables(lowered, constant_buffer1)) {
+        throw std::invalid_argument(*error);
     }
     if (lowered.code.size() < 8 || lowered.code.size() % 8 != 0) {
         throw std::invalid_argument("Compute warm record requires complete lowered code words");
     }
     std::vector<u8> out;
-    out.reserve(4 + EnvHeaderSize + lowered.code.size() + 16 + key.size());
+    out.reserve(4 + EnvHeaderSize + lowered.code.size() + constant_buffer1.size() / 4 * 12 + 16 +
+                key.size());
     Put<u32>(out, 1);
-    PutEnvHeader(out, lowered.code.size(), 0, control.local_memory, 0, 80, ComputeStage);
+    if (constant_buffer1.size() % 4 != 0) {
+        throw std::invalid_argument("Incomplete constant buffer words");
+    }
+    PutEnvHeader(out, lowered.code.size(), constant_buffer1.size() / 4, control.local_memory, 0, 80,
+                 ComputeStage);
     PutBytes(out, lowered.code);
+    for (size_t offset = 0; offset < constant_buffer1.size(); offset += 4) {
+        Put<u64>(out, (u64{1} << 32) | offset);
+        Put<u32>(out, Get<u32>(constant_buffer1, offset));
+    }
     for (const u32 size : control.workgroup) {
         Put<u32>(out, size);
     }
@@ -213,20 +303,19 @@ std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& c
     return out;
 }
 
-std::vector<u8> GraphicsEnv(u32 stage, const LoweredCode& lowered, std::span<const u8> program) {
-    if (lowered.requires_captured_indirect_table) {
-        throw std::invalid_argument("Warm program requires a captured indirect branch table");
+std::vector<u8> GraphicsEnv(u32 stage, const LoweredCode& lowered, std::span<const u8> program,
+                            std::span<const u8> constant_buffer1) {
+    if (const auto error = ValidateIndirectBranchTables(lowered, constant_buffer1)) {
+        throw std::invalid_argument(*error);
     }
     if ((stage != 0 && stage != 4) || program.size() < 80 || lowered.code.size() < 8 ||
-        lowered.code.size() % 8 != 0) {
+        lowered.code.size() % 8 != 0 || constant_buffer1.size() % 4 != 0) {
         throw std::invalid_argument("Invalid graphics warm record stage, header or code size");
     }
     const auto sph = program.first(80);
     const u32 bound = lowered.texture_buffer != ~0U ? lowered.texture_buffer
                                                      : (stage == 0 ? 0U : 2U);
-    // Legacy guess for ordinary constants; never use it as an indirect branch table.
-    const auto bank1 = program.last(std::min<size_t>(256, program.size()));
-    const size_t cbuf_count = (bank1.size() & ~size_t{3}) / 4;
+    const size_t cbuf_count = constant_buffer1.size() / 4;
     const u32 w1 = Get<u32>(sph, 4), w2 = Get<u32>(sph, 8), w3 = Get<u32>(sph, 12);
     const u64 local_memory =
         ((u64{w1} & 0xFFFFFF) | ((u64{w2} & 0xFFFFFF) << 24)) + (u64{w3} & 0xFFFFFF);
@@ -237,7 +326,7 @@ std::vector<u8> GraphicsEnv(u32 stage, const LoweredCode& lowered, std::span<con
     PutBytes(out, lowered.code);
     for (size_t i = 0; i < cbuf_count; ++i) {
         Put<u64>(out, (u64{1} << 32) | (i * 4));
-        Put<u32>(out, Get<u32>(bank1, i * 4));
+        Put<u32>(out, Get<u32>(constant_buffer1, i * 4));
     }
     PutBytes(out, sph);
     return out;

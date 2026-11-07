@@ -194,10 +194,11 @@ void ShaderWarmDialog::OnFinished(const ShaderWarm::Result& result, bool stopped
                         .arg(static_cast<qulonglong>(result.skipped));
         }
         if (result.unsupported_programs > 0) {
-            text += QLatin1Char('\n') +
-                    tr("Excluded (requires runtime shader data): %L1. This warm-up covers only "
-                       "the supported programs.")
-                        .arg(static_cast<qulonglong>(result.unsupported_programs));
+            text +=
+                QLatin1Char('\n') +
+                tr("Excluded (shader data unavailable or invalid): %L1. This warm-up covers only "
+                   "the supported programs.")
+                    .arg(static_cast<qulonglong>(result.unsupported_programs));
         }
         text += QStringLiteral("\n\n") + tr("The warm-up runs by itself when the game starts.");
         if (!ShaderLibrariesOn()) {

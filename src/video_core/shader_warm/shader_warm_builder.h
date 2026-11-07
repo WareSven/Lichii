@@ -48,7 +48,7 @@ struct Result {
     size_t vertex_programs{};    ///< Vertex entries written to the graphics file
     size_t fragment_programs{};  ///< Fragment entries written to the graphics file
     size_t skipped{};            ///< Programs that failed to extract or convert
-    /// Programs requiring uncaptured indirect branch tables
+    /// Programs with invalid metadata or unauthenticated indirect branch tables
     size_t unsupported_programs{};
 };
 

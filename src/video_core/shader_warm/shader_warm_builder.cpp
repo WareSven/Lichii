@@ -148,14 +148,14 @@ u128 Hash128(std::span<const u8> bytes) {
     return Common::CityHash128(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 }
 
-/// One unique vertex or fragment program (make_graphics_warm.py: first manifest program per
-/// code hash, with the origins of that program's code + control identity).
+/// One unique code + control identity, with its archive origins.
 struct GraphicsProgram {
     u32 stage{};
     u128 control{};
     std::vector<u32> archives;
     bool built{};
     u64 hash{};
+    u128 environment_hash{};
 };
 
 struct Job {
@@ -164,12 +164,15 @@ struct Job {
     u32 stage{};
     size_t graphics_index{};
     std::vector<u8> program;
+    std::vector<u8> constant_buffer1;
+    bool valid_program_data{};
     ComputeControl control{};
 };
 
 struct JobResult {
     bool ok{};
-    bool unsupported_indirect_table{};
+    std::string unsupported_reason;
+    bool native_hash{};
     std::vector<u8> bytes; ///< Compute: full entry. Graphics: env record.
     ComputeKey compute_key{};
     u64 hash{};
@@ -256,20 +259,27 @@ private:
     static JobResult Convert(const Job& job) {
         JobResult result;
         try {
+            if (!job.valid_program_data) {
+                result.hash = Hash128(job.program)[0];
+                result.unsupported_reason = "Invalid NVN2 instruction/CB1 extents";
+                return result;
+            }
             LoweredCode lowered;
             if (const auto error = LowerProgram(job.program, job.graphics, lowered)) {
                 LOG_DEBUG(Render_Vulkan, "Shader warm-up: program not converted: {}", *error);
                 return result;
             }
             result.hash = StageHash(lowered.code);
-            if (lowered.requires_captured_indirect_table) {
-                result.unsupported_indirect_table = true;
+            result.native_hash = true;
+            if (const auto error = ValidateIndirectBranchTables(lowered, job.constant_buffer1)) {
+                result.unsupported_reason = *error;
                 return result;
             }
             if (job.graphics) {
-                result.bytes = GraphicsEnv(job.stage, lowered, job.program);
+                result.bytes = GraphicsEnv(job.stage, lowered, job.program, job.constant_buffer1);
             } else {
-                result.bytes = ComputeEntry(lowered, job.control, result.compute_key);
+                result.bytes =
+                    ComputeEntry(lowered, job.control, result.compute_key, job.constant_buffer1);
             }
             result.ok = true;
         } catch (const std::exception& e) {
@@ -450,11 +460,11 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
 
     // Bookkeeping in program order (the order the manifest lists programs).
     std::unordered_set<PairHash, PairHasher> compute_identities;
-    std::unordered_map<u128, size_t, U128Hasher> graphics_index; // code -> program
+    std::unordered_map<PairHash, size_t, PairHasher> graphics_index;
     std::vector<GraphicsProgram> graphics;
-    std::unordered_set<std::string> compute_keys;
-    std::unordered_set<u64> fragment_hashes;
-    std::unordered_set<u64> vertex_hashes;
+    std::unordered_set<u128, U128Hasher> compute_entries;
+    std::unordered_set<u128, U128Hasher> fragment_environments;
+    std::unordered_set<u128, U128Hasher> vertex_environments;
     struct WrittenVertex {
         size_t program;
         u64 key_offset;
@@ -475,20 +485,19 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             : std::clamp<size_t>(std::thread::hardware_concurrency() / 4, 2, 6);
     auto converter = std::make_unique<Converter>(threads, stop);
 
-    // Consumes finished conversions in submission order (first program wins on equal keys).
+    // Consume in submission order, retaining distinct constant-buffer environments.
     std::vector<std::pair<bool, size_t>> job_kinds; // graphics?, graphics program index
     size_t consumed = 0;
     const auto consume = [&](JobResult&& r) {
         const auto [is_graphics, index] = job_kinds[consumed++];
-        if (r.unsupported_indirect_table) {
+        if (!r.unsupported_reason.empty()) {
             ++result.unsupported_programs;
             const char* stage = !is_graphics ? "compute"
                                 : graphics[index].stage == 0 ? "vertex"
                                                              : "fragment";
-            LOG_INFO(Render_Vulkan,
-                     "Shader warm-up excludes {:016x} stage {}: indirect branch table requires "
-                     "captured constants",
-                     r.hash, stage);
+            LOG_INFO(Render_Vulkan, "Shader warm-up excludes {:016x} stage {}: {} ({})", r.hash,
+                     stage, r.unsupported_reason,
+                     r.native_hash ? "native_hash" : "allocation_hash");
             return;
         }
         if (!r.ok) {
@@ -496,9 +505,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             return;
         }
         if (!is_graphics) {
-            const std::string key(reinterpret_cast<const char*>(r.compute_key.data()),
-                                  r.compute_key.size());
-            if (compute_keys.insert(key).second) {
+            if (compute_entries.insert(Hash128(r.bytes)).second) {
                 compute_out.write(reinterpret_cast<const char*>(r.bytes.data()),
                                   static_cast<std::streamsize>(r.bytes.size()));
                 ++result.compute_programs;
@@ -508,9 +515,10 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         GraphicsProgram& program = graphics[index];
         program.built = true;
         program.hash = r.hash;
+        program.environment_hash = Hash128(r.bytes);
         if (program.stage == 4) {
-            if (!fragment_hashes.insert(r.hash).second) {
-                return; // same key as an earlier entry
+            if (!fragment_environments.insert(program.environment_hash).second) {
+                return;
             }
             const auto key = GraphicsEntryKey(4, fragment_template, r.hash, 0);
             Write(graphics_out, u32{1});
@@ -521,8 +529,8 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             ++result.fragment_programs;
             return;
         }
-        if (!vertex_hashes.insert(r.hash).second) {
-            // Same stage hash: same key only if the attribute guess matches, known at the end.
+        if (!vertex_environments.insert(program.environment_hash).second) {
+            // Same environment: the attribute guess can still differ between archives.
             held_vertices.push_back({index, std::move(r.bytes)});
             return;
         }
@@ -560,7 +568,8 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             const u128 control = Hash128(record.control);
             Job job;
             if (is_graphics) {
-                const auto [it, inserted] = graphics_index.try_emplace(code, graphics.size());
+                const auto [it, inserted] =
+                    graphics_index.try_emplace(PairHash{code, control}, graphics.size());
                 if (!inserted) {
                     GraphicsProgram& program = graphics[it->second];
                     if (program.control == control) {
@@ -587,7 +596,14 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
                 job.stage = 5;
             }
             job.seq = seq++;
-            job.program.assign(record.code.begin(), record.code.end());
+            if (const auto data = ReadProgramData(record.code, record.control, is_graphics)) {
+                job.program.assign(data->instructions.begin(), data->instructions.end());
+                job.constant_buffer1.assign(data->constant_buffer1.begin(),
+                                            data->constant_buffer1.end());
+                job.valid_program_data = true;
+            } else {
+                job.program.assign(record.code.begin(), record.code.end());
+            }
             job_kinds.emplace_back(job.graphics, job.graphics_index);
             converter->Push(std::move(job));
             while (converter->Pending() > MaxPendingJobs && !stop.stop_requested()) {
@@ -695,18 +711,18 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     };
 
     report(StageWriting, 0, written_vertices.size() + held_vertices.size());
-    std::set<std::pair<u64, u64>> vertex_keys; // (stage hash, attribute types)
+    std::set<std::pair<u128, u64>> vertex_keys; // (environment hash, attribute types)
     std::vector<std::pair<u64, u64>> patches;  // key offset, attribute types
     for (const auto& written : written_vertices) {
         const auto& program = graphics[written.program];
         const u64 types = attribute_types(program);
-        vertex_keys.emplace(program.hash, types);
+        vertex_keys.emplace(program.environment_hash, types);
         patches.emplace_back(written.key_offset + AttributeTypesOffset, types);
     }
     for (auto& held : held_vertices) {
         const auto& program = graphics[held.program];
         const u64 types = attribute_types(program);
-        if (!vertex_keys.emplace(program.hash, types).second) {
+        if (!vertex_keys.emplace(program.environment_hash, types).second) {
             continue;
         }
         const auto key = GraphicsEntryKey(0, vertex_template, program.hash, types);
@@ -755,7 +771,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     result.ok = true;
     LOG_INFO(Render_Vulkan,
              "Shader warm-up build for {:016x}: {} compute, {} vertex, {} fragment entries, {} "
-             "programs skipped, {} unsupported (uncaptured indirect tables), {} archive and {} "
+             "programs skipped, {} unsupported (invalid shader context), {} archive and {} "
              "member errors, {:.1f} s",
              title_id, result.compute_programs, result.vertex_programs, result.fragment_programs,
              result.skipped, result.unsupported_programs, archive_errors, member_errors,

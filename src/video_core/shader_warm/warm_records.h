@@ -15,8 +15,7 @@
 
 namespace VideoCommon::ShaderWarm {
 
-/// Warm file records, byte for byte what tools/nx2/make_compute_warm.py and
-/// tools/nx2/make_graphics_warm.py write (their headers document every field and guess).
+/// Warm file records use the serialized pipeline environment layout.
 
 constexpr u32 WarmCacheVersion = 53;
 constexpr size_t GraphicsKeySize = 1056;
@@ -54,6 +53,19 @@ struct LoweredCode {
     bool requires_captured_indirect_table{};
 };
 
+struct ProgramData {
+    std::span<const u8> instructions;
+    std::span<const u8> constant_buffer1;
+};
+
+/// NVN2 control fields delimit instructions and the constant segment independently.
+std::optional<ProgramData> ReadProgramData(std::span<const u8> allocation,
+                                           std::span<const u8> control, bool graphics);
+
+/// Every captured indirect branch must use a complete, authenticated CB1 table.
+std::optional<std::string> ValidateIndirectBranchTables(const LoweredCode& lowered,
+                                                        std::span<const u8> constant_buffer1);
+
 /// Lowers one extracted program like `shader-sweep <program> --capture-extent --lower-only
 /// --override-out` (graphics: `--format native-header`, the 128-byte header is skipped) and
 /// builds the runtime code layout: 10 header words (graphics: the 80-byte SPH, compute: zero),
@@ -77,11 +89,12 @@ std::optional<ComputeControl> ReadComputeControl(std::span<const u8> control);
 
 /// One compute entry (env count, env, code, compute trailer, key); `key` gets the 24-byte key.
 std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& control,
-                             ComputeKey& key);
+                             ComputeKey& key, std::span<const u8> constant_buffer1 = {});
 
 /// Env record of a single-stage graphics entry (stage 0 vertex or 4 fragment), without the
-/// leading env count and the key. `program` is the extracted allocation (header + code).
-std::vector<u8> GraphicsEnv(u32 stage, const LoweredCode& lowered, std::span<const u8> program);
+/// leading env count and the key. `program` contains the graphics header and instructions.
+std::vector<u8> GraphicsEnv(u32 stage, const LoweredCode& lowered, std::span<const u8> program,
+                            std::span<const u8> constant_buffer1 = {});
 
 /// The key of a graphics entry: `template_key` with this stage's hash slot (vertex 1,
 /// fragment 5) and, for vertex, the attribute types.

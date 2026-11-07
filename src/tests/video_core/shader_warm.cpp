@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -37,7 +38,244 @@ std::vector<u8> ComputeArchive() {
     bytes[127] = 0x37;
     return bytes;
 }
+
+std::vector<u8> GraphicsAllocation() {
+    std::vector<u8> bytes(512);
+    Store<u32>(bytes, 0, 1U << 10);
+    Store<u32>(bytes, 128, 0x0000794dU);
+    Store<u32>(bytes, 136, 0x03800000U);
+    Store<u32>(bytes, 256, 0x12345678U);
+    return bytes;
+}
+
+std::vector<u8> GraphicsControl() {
+    std::vector<u8> control(108);
+    Store<u32>(control, 0, 0x98761234);
+    Store<u32>(control, 4, 0xc9);
+    Store<u32>(control, 56, 160);
+    Store<u32>(control, 64, 256);
+    Store<u32>(control, 68, 512);
+    return control;
+}
+
+std::vector<u8> GraphicsArchive(bool bahs) {
+    constexpr size_t CodeOffset = 768;
+    constexpr size_t ControlOffset = 408;
+    std::vector<u8> bytes(CodeOffset + 512);
+    const auto allocation = GraphicsAllocation();
+    const auto control = GraphicsControl();
+    std::memcpy(bytes.data() + CodeOffset, allocation.data(), allocation.size());
+    std::memcpy(bytes.data() + ControlOffset, control.data(), control.size());
+    if (bahs) {
+        std::memcpy(bytes.data(), "BAHS", 4);
+        Store<u32>(bytes, 4, 11);
+        Store<u32>(bytes, 8, static_cast<u32>(bytes.size()));
+        Store<u32>(bytes, 12, 5);
+        Store<u32>(bytes, 20, 32);
+        Store<u32>(bytes, 24, 512);
+        Store<u32>(bytes, 28, CodeOffset);
+        Store<u32>(bytes, 368, 148);
+        Store<u32>(bytes, 372, 1);
+        Store<u32>(bytes, 376, 140);
+        Store<u32>(bytes, 388, 124);
+        Store<u64>(bytes, 392, 0);
+        Store<u32>(bytes, 400, 108);
+        Store<s32>(bytes, 404, 16);
+    } else {
+        std::memcpy(bytes.data(), "BNSH", 4);
+        Store<u32>(bytes, 8, 0x00020400);
+        Store<u16>(bytes, 0xc, 0xfeff);
+        Store<u32>(bytes, 0x1c, static_cast<u32>(bytes.size()));
+        std::memcpy(bytes.data() + 0x60, "grsc", 4);
+        Store<u16>(bytes, 0x70, 4);
+        Store<u16>(bytes, 0x72, 200);
+        Store<u32>(bytes, 0x7c, 1);
+        Store<u64>(bytes, 0x80, 256);
+        Store<u64>(bytes, 272, 320);
+        Store<u64>(bytes, 328, 352);
+        Store<u64>(bytes, 360, ControlOffset);
+        Store<u64>(bytes, 368, CodeOffset);
+        Store<u32>(bytes, 376, 512);
+        Store<u32>(bytes, 380, 108);
+    }
+    return bytes;
+}
+
+LoweredCode IndirectTableProgram(u32 bank = 1, u32 offset = 0, u32 entries = 1) {
+    std::vector<u64> words(10);
+    words.push_back(0x3820000000000000ULL | (u64{entries - 1} << 20)); // IMNMX R0
+    words.push_back(0x3848000000200000ULL);                            // SHL R0, R0, 2
+    words.push_back(0);                                                // Scheduling word
+    words.push_back(0xef94000000000001ULL | (u64{bank} << 36) |
+                    (u64{offset & 0xffff} << 20));                  // LDC R1, c[bank][R0]
+    words.push_back(0xe250000000000100ULL | (u64{0xffff88} << 20)); // BRX R1, -120
+    words.push_back(0xe30000000000000fULL);                         // EXIT
+    words.push_back(0);
+    for (const u64 address : {80U, 88U, 104U, 112U, 120U}) {
+        words.push_back(address);
+    }
+    words.push_back(5);
+    words.push_back(0x50414d4e4544454eULL);
+    LoweredCode result;
+    result.requires_captured_indirect_table = true;
+    result.code.resize(words.size() * sizeof(u64));
+    std::memcpy(result.code.data(), words.data(), result.code.size());
+    return result;
+}
 } // namespace
+
+TEST_CASE("BNSH and BAHS preserve the control-delimited constant segment",
+          "[video_core][shader_warm]") {
+    for (const bool bahs : {false, true}) {
+        const auto bytes = GraphicsArchive(bahs);
+        size_t records = 0;
+        WalkArchive(
+            bytes, bahs ? "fixture.sharcb" : "fixture.bnsh", nullptr,
+            [&](const ShaderRecord& record) {
+                ++records;
+                REQUIRE(record.code.size() == 512);
+                const auto data = ReadProgramData(record.code, record.control, true);
+                REQUIRE(data);
+                CHECK(data->instructions.size() == 160);
+                REQUIRE(data->constant_buffer1.size() == 256);
+                CHECK(data->constant_buffer1.front() == 0x78);
+                LoweredCode lowered;
+                CHECK_FALSE(LowerProgram(data->instructions, true, lowered));
+            },
+            [](const std::string&) { FAIL("Unexpected member error"); });
+        CHECK(records == 1);
+    }
+    auto bytes = GraphicsArchive(true);
+    Store<u64>(bytes, 392, std::numeric_limits<u64>::max() - 32);
+    CHECK_THROWS_AS(WalkArchive(
+                        bytes, "overflow.sharcb", nullptr, [](const ShaderRecord&) {},
+                        [](const std::string&) {}),
+                    ArchiveError);
+}
+
+TEST_CASE("Native constant metadata refuses invalid extents", "[video_core][shader_warm]") {
+    auto allocation = GraphicsAllocation();
+    auto control = GraphicsControl();
+    REQUIRE(ReadProgramData(allocation, control, true));
+    SECTION("short control") {
+        control.resize(71);
+    }
+    SECTION("unknown control version") {
+        Store<u32>(control, 4, 0xca);
+    }
+    SECTION("invalid magic") {
+        Store<u32>(control, 0, 0);
+    }
+    SECTION("instructions overlap constants") {
+        Store<u32>(control, 64, 144);
+    }
+    SECTION("reversed constant extent") {
+        Store<u32>(control, 68, 252);
+    }
+    SECTION("constant extent exceeds allocation") {
+        Store<u32>(control, 68, 516);
+    }
+    SECTION("overflowing constant offset") {
+        Store<u32>(control, 64, 0xfffffff0);
+    }
+    SECTION("partial instruction") {
+        Store<u32>(control, 56, 159);
+    }
+    SECTION("partial constant word") {
+        Store<u32>(control, 68, 511);
+    }
+    CHECK_FALSE(ReadProgramData(allocation, control, true));
+}
+
+TEST_CASE("BNSH variants retain constants independently of their native code hash",
+          "[video_core][shader_warm]") {
+    auto bytes = GraphicsArchive(false);
+    bytes.resize(2048);
+    std::fill(bytes.begin() + 256, bytes.end(), 0);
+    Store<u32>(bytes, 0x1c, static_cast<u32>(bytes.size()));
+    Store<u32>(bytes, 0x7c, 2);
+    const auto control = GraphicsControl();
+    for (size_t index = 0; index < 2; ++index) {
+        const size_t program = 384 + index * 64;
+        const size_t record = 512 + index * 64;
+        const size_t metadata = 640 + index * 128;
+        const size_t allocation = 1024 + index * 512;
+        Store<u64>(bytes, 272 + index * 64, program);
+        Store<u64>(bytes, program + 8, record);
+        Store<u64>(bytes, record + 8, metadata);
+        Store<u64>(bytes, record + 16, allocation);
+        Store<u32>(bytes, record + 24, 512);
+        Store<u32>(bytes, record + 28, static_cast<u32>(control.size()));
+        std::memcpy(bytes.data() + metadata, control.data(), control.size());
+        auto code = GraphicsAllocation();
+        Store<u32>(code, 256, static_cast<u32>(index + 1));
+        std::memcpy(bytes.data() + allocation, code.data(), code.size());
+    }
+    std::vector<u64> hashes;
+    std::vector<std::vector<u8>> environments;
+    WalkArchive(
+        bytes, "variants.bnsh", nullptr,
+        [&](const ShaderRecord& record) {
+            const auto data = ReadProgramData(record.code, record.control, true);
+            REQUIRE(data);
+            LoweredCode lowered;
+            REQUIRE_FALSE(LowerProgram(data->instructions, true, lowered));
+            hashes.push_back(StageHash(lowered.code));
+            environments.push_back(
+                GraphicsEnv(0, lowered, data->instructions, data->constant_buffer1));
+        },
+        [](const std::string&) { FAIL("Unexpected member error"); });
+    REQUIRE(hashes.size() == 2);
+    CHECK(hashes[0] == hashes[1]);
+    CHECK(environments[0] != environments[1]);
+}
+
+TEST_CASE("Constant data cannot complete an unterminated instruction capture",
+          "[video_core][shader_warm]") {
+    auto allocation = GraphicsAllocation();
+    const auto control = GraphicsControl();
+    Store<u32>(allocation, 128, 0x00007918U);
+    Store<u32>(allocation, 136, 0U);
+    Store<u32>(allocation, 144, 0x00007918U);
+    Store<u32>(allocation, 256, 0x0000794dU);
+    Store<u32>(allocation, 264, 0x03800000U);
+    const auto data = ReadProgramData(allocation, control, true);
+    REQUIRE(data);
+    LoweredCode lowered;
+    CHECK(LowerProgram(data->instructions, true, lowered));
+}
+
+TEST_CASE("Indirect tables require every value from authenticated CB1",
+          "[video_core][shader_warm]") {
+    const std::array<u8, 4> constants{};
+    const auto valid = IndirectTableProgram();
+    CHECK_FALSE(ValidateIndirectBranchTables(valid, constants));
+    auto absolute = valid;
+    Store<u64>(absolute.code, 112, 0xe200000000000100ULL | (u64{0xfffff8} << 20));
+    CHECK_FALSE(ValidateIndirectBranchTables(absolute, constants));
+    CHECK(ValidateIndirectBranchTables(valid, {}));
+    CHECK(ValidateIndirectBranchTables(IndirectTableProgram(0), constants));
+    CHECK(ValidateIndirectBranchTables(IndirectTableProgram(2), constants));
+    CHECK(ValidateIndirectBranchTables(IndirectTableProgram(1, 1), constants));
+    CHECK(ValidateIndirectBranchTables(IndirectTableProgram(1, 4), constants));
+    CHECK(ValidateIndirectBranchTables(IndirectTableProgram(1, 0, 2), constants));
+    CHECK(ValidateIndirectBranchTables(IndirectTableProgram(1, 0xfffc), constants));
+    std::array<u8, 4> invalid_target{1};
+    CHECK(ValidateIndirectBranchTables(valid, invalid_target));
+    auto untracked = valid;
+    Store<u64>(untracked.code, 104, 0xe30000000000000fULL);
+    CHECK(ValidateIndirectBranchTables(untracked, constants));
+    auto second_branch = valid;
+    Store<u64>(second_branch.code, 120, 0xe250000000000200ULL); // R2 has no table
+    CHECK(ValidateIndirectBranchTables(second_branch, constants));
+
+    ComputeKey first_key{}, second_key{};
+    const auto first = ComputeEntry(valid, {{1, 1, 1}, 0, 0}, first_key, constants);
+    std::array<u8, 4> other_target{16};
+    const auto second = ComputeEntry(valid, {{1, 1, 1}, 0, 0}, second_key, other_target);
+    CHECK(first_key == second_key);
+    CHECK(first != second); // Equal native code can have distinct constant environments.
+}
 
 TEST_CASE("Shader archive validates table and payload extents", "[video_core][shader_warm]") {
     auto bytes = ComputeArchive();
@@ -114,7 +352,7 @@ TEST_CASE("Warm serialization rejects incomplete code and headers", "[video_core
     u64 hash;
     std::memcpy(&hash, key.data(), sizeof(hash));
     CHECK(hash == StageHash(lowered.code));
-    CHECK(GraphicsEnv(0, lowered, header).size() == 76 + 8 + 20 * 12 + 80);
+    CHECK(GraphicsEnv(0, lowered, header).size() == 76 + 8 + 80);
 }
 
 TEST_CASE("Warm completion marker requires every requested build", "[video_core][shader_warm]") {

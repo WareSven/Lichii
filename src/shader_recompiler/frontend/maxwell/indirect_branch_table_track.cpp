@@ -21,8 +21,8 @@ union Encoding {
     BitField<20, 24, s64> brx_offset;
 };
 
-template <typename Callable>
-std::optional<u64> Track(Environment& env, Location block_begin, Location& pos, Callable&& func) {
+template <typename Reader, typename Callable>
+std::optional<u64> Track(Reader& env, Location block_begin, Location& pos, Callable&& func) {
     while (pos >= block_begin) {
         const u64 insn{env.ReadInstruction(pos.Offset())};
         --pos;
@@ -33,8 +33,8 @@ std::optional<u64> Track(Environment& env, Location block_begin, Location& pos, 
     return std::nullopt;
 }
 
-std::optional<u64> TrackLDC(Environment& env, Location block_begin, Location& pos,
-                            IR::Reg brx_reg) {
+template <typename Reader>
+std::optional<u64> TrackLDC(Reader& env, Location block_begin, Location& pos, IR::Reg brx_reg) {
     return Track(env, block_begin, pos, [brx_reg](u64 insn, Opcode opcode) {
         const LDC::Encoding ldc{insn};
         return opcode == Opcode::LDC && ldc.dest_reg == brx_reg && ldc.size == LDC::Size::B32 &&
@@ -42,25 +42,24 @@ std::optional<u64> TrackLDC(Environment& env, Location block_begin, Location& po
     });
 }
 
-std::optional<u64> TrackSHL(Environment& env, Location block_begin, Location& pos,
-                            IR::Reg ldc_reg) {
+template <typename Reader>
+std::optional<u64> TrackSHL(Reader& env, Location block_begin, Location& pos, IR::Reg ldc_reg) {
     return Track(env, block_begin, pos, [ldc_reg](u64 insn, Opcode opcode) {
         const Encoding shl{insn};
         return opcode == Opcode::SHL_imm && shl.dest_reg == ldc_reg;
     });
 }
 
-std::optional<u64> TrackIMNMX(Environment& env, Location block_begin, Location& pos,
-                              IR::Reg shl_reg) {
+template <typename Reader>
+std::optional<u64> TrackIMNMX(Reader& env, Location block_begin, Location& pos, IR::Reg shl_reg) {
     return Track(env, block_begin, pos, [shl_reg](u64 insn, Opcode opcode) {
         const Encoding imnmx{insn};
         return opcode == Opcode::IMNMX_imm && imnmx.dest_reg == shl_reg;
     });
 }
-} // Anonymous namespace
-
-std::optional<IndirectBranchTableInfo> TrackIndirectBranchTable(Environment& env, Location brx_pos,
-                                                                Location block_begin) {
+template <typename Reader>
+std::optional<IndirectBranchTableInfo> TrackTable(Reader& env, Location brx_pos,
+                                                  Location block_begin) {
     const u64 brx_insn{env.ReadInstruction(brx_pos.Offset())};
     const Opcode brx_opcode{Decode(brx_insn)};
     if (brx_opcode != Opcode::BRX && brx_opcode != Opcode::JMX) {
@@ -102,6 +101,30 @@ std::optional<IndirectBranchTableInfo> TrackIndirectBranchTable(Environment& env
         .branch_offset = brx_offset,
         .branch_reg = brx_reg,
     };
+}
+
+struct CodeReader {
+    std::span<const u64> code;
+
+    u64 ReadInstruction(u32 address) const {
+        if (address % sizeof(u64) != 0 || address / sizeof(u64) >= code.size()) {
+            throw LogicError("Indirect branch tracker instruction out of bounds");
+        }
+        return code[address / sizeof(u64)];
+    }
+};
+} // Anonymous namespace
+
+std::optional<IndirectBranchTableInfo> TrackIndirectBranchTable(Environment& env, Location brx_pos,
+                                                                Location block_begin) {
+    return TrackTable(env, brx_pos, block_begin);
+}
+
+std::optional<IndirectBranchTableInfo> TrackIndirectBranchTable(std::span<const u64> code,
+                                                                Location brx_pos,
+                                                                Location block_begin) {
+    CodeReader reader{code};
+    return TrackTable(reader, brx_pos, block_begin);
 }
 
 } // namespace Shader::Maxwell
