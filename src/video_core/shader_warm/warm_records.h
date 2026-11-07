@@ -28,6 +28,24 @@ constexpr u64 DefaultAttributeTypes = 0x555555555555f555ULL;
 using GraphicsKey = std::array<u8, GraphicsKeySize>;
 using ComputeKey = std::array<u8, 24>;
 
+inline bool ValidGraphicsWarmStages(u32 stage, std::span<const u64> hashes) {
+    if ((stage != 0 && stage != 4) || hashes.size() != 6) {
+        return false;
+    }
+    const size_t slot = stage == 0 ? 1 : 5;
+    for (size_t i = 0; i < hashes.size(); ++i) {
+        if ((hashes[i] != 0) != (i == slot)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool WarmBuildComplete(bool read_ok, bool cancelled, size_t expected, size_t built,
+                              size_t failed) {
+    return read_ok && !cancelled && expected != 0 && built == expected && failed == 0;
+}
+
 /// A program lowered and laid out like LowerNativeCode (video_core/shader_environment.cpp).
 struct LoweredCode {
     std::vector<u8> code;

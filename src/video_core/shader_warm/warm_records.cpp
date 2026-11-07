@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <stdexcept>
 #include <unordered_set>
 
 #include "common/cityhash.h"
@@ -180,6 +181,9 @@ std::optional<ComputeControl> ReadComputeControl(std::span<const u8> control) {
 
 std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& control,
                              ComputeKey& key) {
+    if (lowered.code.size() < 8 || lowered.code.size() % 8 != 0) {
+        throw std::invalid_argument("Compute warm record requires complete lowered code words");
+    }
     std::vector<u8> out;
     out.reserve(4 + EnvHeaderSize + lowered.code.size() + 16 + key.size());
     Put<u32>(out, 1);
@@ -201,6 +205,10 @@ std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& c
 }
 
 std::vector<u8> GraphicsEnv(u32 stage, const LoweredCode& lowered, std::span<const u8> program) {
+    if ((stage != 0 && stage != 4) || program.size() < 80 || lowered.code.size() < 8 ||
+        lowered.code.size() % 8 != 0) {
+        throw std::invalid_argument("Invalid graphics warm record stage, header or code size");
+    }
     const auto sph = program.first(80);
     const u32 bound = lowered.texture_buffer != ~0U ? lowered.texture_buffer
                                                      : (stage == 0 ? 0U : 2U);
@@ -225,7 +233,11 @@ std::vector<u8> GraphicsEnv(u32 stage, const LoweredCode& lowered, std::span<con
 
 GraphicsKey GraphicsEntryKey(u32 stage, const GraphicsKey& template_key, u64 stage_hash,
                              u64 attribute_types) {
+    if ((stage != 0 && stage != 4) || stage_hash == 0) {
+        throw std::invalid_argument("Graphics warm key requires one vertex or fragment stage");
+    }
     GraphicsKey key = template_key;
+    std::fill_n(key.begin(), 48, u8{0});
     const size_t slot = stage == 0 ? 1 : 5;
     std::memcpy(key.data() + slot * 8, &stage_hash, sizeof(stage_hash));
     if (stage == 0) {

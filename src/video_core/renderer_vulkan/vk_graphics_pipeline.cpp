@@ -436,6 +436,9 @@ GraphicsPipeline::GraphicsPipeline(
                     LOG_ERROR(Render_Vulkan, "Nx2Perf gpl: pipeline {:016x} linking failed: {}",
                               key.Hash(), exception.what());
                 }
+                if (!made && libraries_only) {
+                    throw Shader::RuntimeError("Graphics warm-up failed to build its shader library");
+                }
                 if (!made && !libraries_only) {
                     library_cache->RecordFallback();
                     FallBackToMonolithic(render_pass);

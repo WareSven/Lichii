@@ -1640,10 +1640,11 @@ void Device::RemoveUnsuitableExtensions() {
     if (graphics_pipeline_library_requested) {
         const bool usable =
             graphics_pipeline_library_features.graphicsPipelineLibrary &&
-            properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking;
+            properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking &&
+            properties.properties.limits.maxBoundDescriptorSets >= 5;
         if (!usable) {
             LOG_WARNING(Render_Vulkan,
-                        "Nx2Perf gpl: the device has no graphics pipeline library fast linking, "
+                        "Nx2Perf gpl: the device lacks fast linking or five descriptor sets, "
                         "EDEN_NX2_GPL ignored");
             loaded_extensions.erase(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
             loaded_extensions.erase(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);

@@ -57,6 +57,8 @@
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
+#include "video_core/shader_warm/warm_records.h"
+#include "video_core/shader_warm/warmup_wait.h"
 #include "video_core/surface.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -81,6 +83,10 @@ using VideoCommon::GuessMissing;
 using VideoCommon::GraphicsEnvironment;
 
 constexpr u32 CACHE_VERSION = VideoCommon::VulkanPipelineCacheVersion;
+static_assert(sizeof(GraphicsPipelineCacheKey) == VideoCommon::ShaderWarm::GraphicsKeySize);
+static_assert(offsetof(GraphicsPipelineCacheKey, state) +
+                  offsetof(FixedPipelineState, attribute_types) ==
+              VideoCommon::ShaderWarm::AttributeTypesOffset);
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -1066,6 +1072,16 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         background_pipelines.Start(std::clamp<size_t>(num_pipeline_workers / 4, 1, 2));
         StartComputeWarm(title_id);
         StartGraphicsWarm(title_id);
+        const char* wait = std::getenv("EDEN_NX2_WARM_BEFORE_PLAY");
+        if (wait != nullptr && wait[0] == '1') {
+            VideoCommon::ShaderWarm::WaitForWarmup(compute_warm_threads, graphics_warm_threads,
+                                                  stop_loading);
+            LOG_INFO(Render_Vulkan,
+                     "Nx2Perf warm_before_play: joined {} compute and {} graphics threads, "
+                     "cancelled={}",
+                     compute_warm_threads.size(), graphics_warm_threads.size(),
+                     stop_loading.stop_requested());
+        }
     }
 }
 
@@ -1295,8 +1311,9 @@ void PipelineCache::StartComputeWarm(u64 title_id) {
             }
             if (progress->running.fetch_sub(1) == 1) {
                 shader_notify.SetWarmProgress(0, 0, 0);
-                if (read_ok && !stop.stop_requested() &&
-                    progress->built + progress->failed >= entries->size()) {
+                if (VideoCommon::ShaderWarm::WarmBuildComplete(
+                        read_ok, stop.stop_requested(), entries->size(), progress->built.load(),
+                        progress->failed.load())) {
                     WriteWarmMarker(warm_file, title_file, device, file_entries);
                 }
                 compute_warm_done = true;
@@ -1411,6 +1428,13 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
                         }
                         env.Deserialize(reader->file);
                         reader->file.read(reinterpret_cast<char*>(&key), sizeof(key));
+                        if (!VideoCommon::ShaderWarm::ValidGraphicsWarmStages(
+                                static_cast<u32>(env.ShaderStage()), key.unique_hashes)) {
+                            LOG_WARNING(Render_Vulkan,
+                                        "Nx2Perf graphics_warm: stage and key disagree, stopping");
+                            reader->failed = true;
+                            break;
+                        }
                         ++reader->read;
                         reader->position = reader->file.tellg();
                     } catch (const std::exception& e) {
@@ -1457,7 +1481,9 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
                     std::scoped_lock lock{reader->mutex};
                     complete = !reader->failed && reader->end == reader->position;
                 }
-                if (complete && !stop.stop_requested()) {
+                if (VideoCommon::ShaderWarm::WarmBuildComplete(
+                        complete, stop.stop_requested(), reader->read, reader->built.load(),
+                        reader->failed_builds.load())) {
                     WriteWarmMarker(warm_file, title_file, device, reader->read);
                 }
                 LOG_INFO(Render_Vulkan,
@@ -1836,7 +1862,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     // pipelines, transform feedback, a static rasterizer discard, and stages whose texture or
     // image counts do not fit the split rescaling bits.
     const bool use_libraries = [&] {
-        if (!device.IsExtGraphicsPipelineLibrarySupported() || key.state.xfb_enabled != 0) {
+        if (!device.IsExtGraphicsPipelineLibrarySupported() || key.state.xfb_enabled != 0 ||
+            (!libraries_only && key.unique_hashes.back() == 0)) {
             return false;
         }
         if (key.state.extended_dynamic_state_2 == 0 &&
