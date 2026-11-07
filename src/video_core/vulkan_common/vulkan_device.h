@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -1263,6 +1264,7 @@ private:
     vk::Queue graphics_queue;    ///< Main graphics queue.
     vk::Queue present_queue;     ///< Main present queue.
     vk::PipelineCache static_pipeline_cache;
+    std::filesystem::path static_pipeline_cache_filename;
     bool owns_static_pipeline_cache{};
     u32 instance_version{};      ///< Vulkan instance version.
     u32 graphics_family{};       ///< Main graphics queue family index.
