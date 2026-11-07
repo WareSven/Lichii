@@ -272,7 +272,7 @@ private:
     std::array<std::shared_ptr<const GplLibrary>, 2> shader_libraries;
     vk::Pipeline vertex_input_library;
     vk::Pipeline fragment_output_library;
-    vk::DescriptorSetLayout fallback_empty_set_layout;
+    vk::DescriptorSetLayout empty_set_layout;
     bool linked{};
 
     vk::DescriptorSetLayout descriptor_set_layout;

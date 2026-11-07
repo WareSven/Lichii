@@ -61,6 +61,16 @@ using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
 
 constexpr size_t NUM_STAGES = Maxwell::MaxShaderStage;
 
+vk::DescriptorSetLayout CreateEmptySetLayout(const Device& device) {
+    return device.GetLogical().CreateDescriptorSetLayout({
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .bindingCount = 0,
+        .pBindings = nullptr,
+    });
+}
+
 bool ClaimInlinePipelines() {
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_PIPELINE_CLAIM_INLINE");
@@ -356,6 +366,7 @@ GraphicsPipeline::GraphicsPipeline(
         // Graphics pipeline libraries: one set per stage (set index = stage index), plain
         // descriptor sets (a layout has room for one push descriptor set, and the descriptor
         // buffer path is left out).
+        empty_set_layout = CreateEmptySetLayout(device);
         std::array<VkDescriptorSetLayout, NUM_STAGES> set_layouts{};
         size_t descriptor_offset{};
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
@@ -366,6 +377,7 @@ GraphicsPipeline::GraphicsPipeline(
                 sizeof(DescriptorUpdateEntry) * NumDescriptorEntries(stage_infos[stage]);
             stage_set_signatures[stage] = stage_builder.SetLayoutSignature();
             if (stage_builder.Empty()) {
+                set_layouts[stage] = *empty_set_layout;
                 continue;
             }
             stage_set_layouts[stage] = stage_builder.CreateDescriptorSetLayout(false);
@@ -1661,10 +1673,11 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
         }
         DescriptorLayoutBuilder builder{device};
         builder.Add(stage_infos[stage], StageFlag(stage_infos[stage], SlotStage(stage)));
-        if (!builder.Empty()) {
-            library.set_layouts.push_back(builder.CreateDescriptorSetLayout(false));
-            set_layouts[stage] = *library.set_layouts.back();
-        }
+        // Each slot belongs to one library, even when that stage has no resources.
+        // The other library leaves it null; never leave it null in both libraries.
+        library.set_layouts.push_back(builder.Empty() ? CreateEmptySetLayout(device)
+                                                     : builder.CreateDescriptorSetLayout(false));
+        set_layouts[stage] = *library.set_layouts.back();
         if (!spv_modules[stage]) {
             continue;
         }
@@ -1851,17 +1864,10 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
 void GraphicsPipeline::FallBackToMonolithic(VkRenderPass render_pass) {
     // The stages were emitted with one set per stage: keep the sets, with a layout a monolithic
     // pipeline accepts (no independent sets, no null set layouts).
-    fallback_empty_set_layout = device.GetLogical().CreateDescriptorSetLayout({
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .bindingCount = 0,
-        .pBindings = nullptr,
-    });
     std::array<VkDescriptorSetLayout, NUM_STAGES> set_layouts{};
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         set_layouts[stage] =
-            stage_set_layouts[stage] ? *stage_set_layouts[stage] : *fallback_empty_set_layout;
+            stage_set_layouts[stage] ? *stage_set_layouts[stage] : *empty_set_layout;
     }
     pipeline_layout =
         DescriptorLayoutBuilder{device}.CreateIndependentPipelineLayout(set_layouts, false);

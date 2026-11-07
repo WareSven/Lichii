@@ -262,7 +262,7 @@ public:
     }
 
     /// Graphics pipeline libraries (EDEN_NX2_GPL): one set per stage, set index = stage index,
-    /// null where the stage has no descriptors or is not part of the library.
+    /// null only where the stage is not part of the library.
     vk::PipelineLayout CreateIndependentPipelineLayout(
         std::span<const VkDescriptorSetLayout> set_layouts, bool independent_sets) const {
         const VkPushConstantRange range{PushConstantRange()};
