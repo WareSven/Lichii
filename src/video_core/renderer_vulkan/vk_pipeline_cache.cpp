@@ -669,9 +669,6 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
 }
 
 namespace {
-// <title>/vulkan_used.bin: the graphics pipelines recent sessions used, as key hash + sessions
-// since the last use.
-constexpr u32 UsedPipelinesMagic = 0x31505545; // "EUP1"
 // Pipelines the last two sessions used are built at boot. Each holds ~0.45 MB of driver memory:
 // title 1 built 4,800 from eight sessions, 1.5 GB more than building them on first use (but that
 // stalled frames 4x as often), while one session of its title screen uses ~1,500.
@@ -690,34 +687,11 @@ u8 MaxUsedPipelineAge(const Device& device) {
     return UsedPipelinesMaxAge;
 }
 
-std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path, u8 max_age) {
-    std::unordered_map<u64, u8> used;
-    std::ifstream file{path, std::ios::binary};
-    u32 magic{}, count{};
-    if (!file.read(reinterpret_cast<char*>(&magic), sizeof(magic)) || magic != UsedPipelinesMagic ||
-        !file.read(reinterpret_cast<char*>(&count), sizeof(count))) {
-        return used;
-    }
-    used.reserve(count);
-    for (u32 i = 0; i < count; ++i) {
-        u64 hash{};
-        u8 age{};
-        if (!file.read(reinterpret_cast<char*>(&hash), sizeof(hash)) ||
-            !file.read(reinterpret_cast<char*>(&age), sizeof(age))) {
-            break;
-        }
-        if (age < max_age) { // lists saved with a longer window
-            used.emplace(hash, age);
-        }
-    }
-    return used;
-}
-
 // Without a list of the pipelines recent sessions used (the first boot with this cache, or a session
 // that ended before saving it), this many cached graphics pipelines at most are built at boot and the
 // rest when first needed. A cache that grew over many builds held 48k pipelines, ~21 GB of driver
-// memory built before the game started; the list is only saved at exit or after two minutes, so a
-// boot that ran out of memory never saved one and the next boot did the same.
+// memory built before the game started. A boot that runs out of memory before saving a list can
+// otherwise repeat the same allocation on every launch.
 constexpr size_t MaxPipelinesWithoutUsedList = 3000;
 
 // EDEN_NX2_PRELOAD_ALL_PIPELINES=1 builds every cached pipeline at boot, as before.
@@ -752,35 +726,25 @@ PipelineCache::~PipelineCache() {
 }
 
 void PipelineCache::SaveUsedPipelines() {
-    used_pipelines_saved = std::chrono::steady_clock::now();
-    // A session too short to say what the game uses (a boot to the menu) keeps the old list.
-    constexpr size_t MinimumUsed = 64;
     if (used_pipelines_filename.empty() ||
-        used_this_session.size() + used_and_evicted.size() < MinimumUsed) {
+        !used_pipeline_checkpoint.CanSave(used_this_session.size() + used_and_evicted.size())) {
         return;
     }
-    std::unordered_map<u64, u8> next;
-    next.reserve(used_pipelines.size() + used_this_session.size());
+    std::vector<u64> used;
+    used.reserve(used_this_session.size() + used_and_evicted.size());
     for (const auto& [key, pipeline] : graphics_cache) {
         if (used_this_session.contains(pipeline.get())) {
-            next.emplace(key.Hash(), u8{0});
+            used.push_back(key.Hash());
         }
     }
     for (const u64 hash : used_and_evicted) {
-        next.emplace(hash, u8{0});
+        used.push_back(hash);
     }
-    for (const auto& [hash, age] : used_pipelines) {
-        if (age + 1 < MaxUsedPipelineAge(device)) {
-            next.try_emplace(hash, static_cast<u8>(age + 1));
-        }
-    }
-    std::ofstream file{used_pipelines_filename, std::ios::binary | std::ios::trunc};
-    const u32 count = static_cast<u32>(next.size());
-    file.write(reinterpret_cast<const char*>(&UsedPipelinesMagic), sizeof(UsedPipelinesMagic));
-    file.write(reinterpret_cast<const char*>(&count), sizeof(count));
-    for (const auto& [hash, age] : next) {
-        file.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
-        file.write(reinterpret_cast<const char*>(&age), sizeof(age));
+    const auto snapshot = MakeUsedPipelineSnapshot(used_pipelines, used, MaxUsedPipelineAge(device));
+    const bool success = SaveUsedPipelineSnapshot(used_pipelines_filename, snapshot);
+    used_pipeline_checkpoint.CompleteAttempt(std::chrono::steady_clock::now(), success);
+    if (!success) {
+        LOG_WARNING(Render_Vulkan, "Failed to checkpoint used graphics pipelines; keeping old list");
     }
 }
 
@@ -873,7 +837,6 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                                used_pipelines_filename, std::filesystem::copy_options::none,
                                migration_error);
     used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
-    used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
     size_t deferred_pipelines = 0;
     size_t queued_graphics = 0;
@@ -1169,10 +1132,8 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     if (!pipeline) {
         return nullptr;
     }
-    constexpr auto save_interval = std::chrono::seconds{15};
-    if (used_this_session.insert(pipeline.get()).second &&
-        std::chrono::steady_clock::now() - used_pipelines_saved > save_interval) {
-        SaveUsedPipelines();
+    if (used_this_session.insert(pipeline.get()).second) {
+        used_pipeline_checkpoint.MarkDirty();
     }
     if (current_pipeline) {
         current_pipeline->AddTransition(pipeline.get());
@@ -1184,6 +1145,11 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
 
 void PipelineCache::TickFrame() {
     ++frame_count;
+    if (!used_pipelines_filename.empty() &&
+        used_pipeline_checkpoint.IsDue(std::chrono::steady_clock::now(),
+                                       used_this_session.size() + used_and_evicted.size())) {
+        SaveUsedPipelines();
+    }
     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
         evicted_pipelines.pop_front();
     }

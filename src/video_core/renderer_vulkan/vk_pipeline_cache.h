@@ -32,6 +32,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
+#include "video_core/renderer_vulkan/used_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -209,7 +210,7 @@ private:
     std::unordered_map<u64, u8> used_pipelines; ///< Key hash -> sessions since it was last used
     std::unordered_set<const GraphicsPipeline*> used_this_session;
     std::filesystem::path used_pipelines_filename;
-    std::chrono::steady_clock::time_point used_pipelines_saved{};
+    UsedPipelineCheckpoint used_pipeline_checkpoint;
     void SaveUsedPipelines();
 
     std::filesystem::path vulkan_pipeline_cache_filename;
