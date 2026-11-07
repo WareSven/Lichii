@@ -524,9 +524,9 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
     const auto result = ShaderWarm::BuildWarmFilesWith(
         system, Common::FS::ToU8String(argv[2]), title_id, options, on_progress, {});
     fmt::print("{{\"ok\": {}, \"error\": \"{}\", \"compute\": {}, \"vertex\": {}, "
-               "\"fragment\": {}, \"skipped\": {}, \"seconds\": {:.1f}}}\n",
+               "\"fragment\": {}, \"skipped\": {}, \"unsupported\": {}, \"seconds\": {:.1f}}}\n",
                result.ok, result.error, result.compute_programs, result.vertex_programs,
-               result.fragment_programs, result.skipped,
+               result.fragment_programs, result.skipped, result.unsupported_programs,
                std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
     std::fflush(stdout);
     return result.ok;

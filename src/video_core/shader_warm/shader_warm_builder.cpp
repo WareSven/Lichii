@@ -169,6 +169,7 @@ struct Job {
 
 struct JobResult {
     bool ok{};
+    bool unsupported_indirect_table{};
     std::vector<u8> bytes; ///< Compute: full entry. Graphics: env record.
     ComputeKey compute_key{};
     u64 hash{};
@@ -260,8 +261,12 @@ private:
                 LOG_DEBUG(Render_Vulkan, "Shader warm-up: program not converted: {}", *error);
                 return result;
             }
+            result.hash = StageHash(lowered.code);
+            if (lowered.requires_captured_indirect_table) {
+                result.unsupported_indirect_table = true;
+                return result;
+            }
             if (job.graphics) {
-                result.hash = StageHash(lowered.code);
                 result.bytes = GraphicsEnv(job.stage, lowered, job.program);
             } else {
                 result.bytes = ComputeEntry(lowered, job.control, result.compute_key);
@@ -475,6 +480,17 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     size_t consumed = 0;
     const auto consume = [&](JobResult&& r) {
         const auto [is_graphics, index] = job_kinds[consumed++];
+        if (r.unsupported_indirect_table) {
+            ++result.unsupported_programs;
+            const char* stage = !is_graphics ? "compute"
+                                : graphics[index].stage == 0 ? "vertex"
+                                                             : "fragment";
+            LOG_INFO(Render_Vulkan,
+                     "Shader warm-up excludes {:016x} stage {}: indirect branch table requires "
+                     "captured constants",
+                     r.hash, stage);
+            return;
+        }
         if (!r.ok) {
             ++result.skipped;
             return;
@@ -739,9 +755,10 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     result.ok = true;
     LOG_INFO(Render_Vulkan,
              "Shader warm-up build for {:016x}: {} compute, {} vertex, {} fragment entries, {} "
-             "programs skipped, {} archive and {} member errors, {:.1f} s",
+             "programs skipped, {} unsupported (uncaptured indirect tables), {} archive and {} "
+             "member errors, {:.1f} s",
              title_id, result.compute_programs, result.vertex_programs, result.fragment_programs,
-             result.skipped, archive_errors, member_errors,
+             result.skipped, result.unsupported_programs, archive_errors, member_errors,
              std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
     return result;
 }

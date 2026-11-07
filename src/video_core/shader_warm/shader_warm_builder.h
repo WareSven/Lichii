@@ -48,6 +48,8 @@ struct Result {
     size_t vertex_programs{};    ///< Vertex entries written to the graphics file
     size_t fragment_programs{};  ///< Fragment entries written to the graphics file
     size_t skipped{};            ///< Programs that failed to extract or convert
+    /// Programs requiring uncaptured indirect branch tables
+    size_t unsupported_programs{};
 };
 
 /// Builds both warm-up files for the game at `game_path` (any format the loader opens, Switch 2

@@ -50,6 +50,8 @@ inline bool WarmBuildComplete(bool read_ok, bool cancelled, size_t expected, siz
 struct LoweredCode {
     std::vector<u8> code;
     u32 texture_buffer = ~0U;
+    /// BRX/BRXU in captured code; no reachability proof
+    bool requires_captured_indirect_table{};
 };
 
 /// Lowers one extracted program like `shader-sweep <program> --capture-extent --lower-only

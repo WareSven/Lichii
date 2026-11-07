@@ -126,6 +126,38 @@ TEST_CASE("Warm completion marker requires every requested build", "[video_core]
     CHECK_FALSE(WarmBuildComplete(true, false, 0, 0, 0));
 }
 
+TEST_CASE("Warm generation requires captured tables for indirect branches",
+          "[video_core][shader_warm]") {
+    for (const bool uniform : {false, true}) {
+        std::vector<u8> program(128 + 32);
+        Store<u32>(program, 0, 1U << 10); // Vertex header
+        Store<u32>(program, 128, uniform ? 0x00007958U : 0x00007949U);
+        Store<u32>(program, 132, 0xfffffff0U);
+        Store<u32>(program, 136, uniform ? 0x0b83ffffU : 0x0383ffffU);
+        Store<u32>(program, 140, 0x000fc000U);
+        Store<u32>(program, 144, 0x00007947U); // Capture-ending branch to itself
+        Store<u32>(program, 148, 0xfffffff0U);
+        Store<u32>(program, 152, 0x0383ffffU);
+        Store<u32>(program, 156, 0x000fc000U);
+
+        LoweredCode lowered;
+        REQUIRE_FALSE(LowerProgram(program, true, lowered));
+        REQUIRE(lowered.requires_captured_indirect_table);
+        ComputeKey key{};
+        CHECK_THROWS_AS(ComputeEntry(lowered, {{1, 1, 1}, 0, 0}, key), std::invalid_argument);
+        CHECK_THROWS_AS(GraphicsEnv(0, lowered, program), std::invalid_argument);
+
+        // A BRX-looking word after the capture's EXIT is allocation padding, not program code.
+        Store<u32>(program, 128, 0x0000794dU);
+        Store<u32>(program, 132, 0U);
+        Store<u32>(program, 136, 0x03800000U);
+        Store<u32>(program, 144, 0x00007949U);
+        REQUIRE_FALSE(LowerProgram(program, true, lowered));
+        CHECK_FALSE(lowered.requires_captured_indirect_table);
+        CHECK_NOTHROW(GraphicsEnv(0, lowered, program));
+    }
+}
+
 TEST_CASE("Waiting for warmup does not cancel successful work", "[video_core][shader_warm]") {
     std::promise<void> compute_done;
     auto ready = compute_done.get_future().share();

@@ -135,6 +135,12 @@ std::optional<std::string> LowerProgram(std::span<const u8> program, bool graphi
         offsets.size() != native.size()) {
         return "Cannot encode the lowering as an override record";
     }
+    // BRX/BRXU targets come from a bound constant buffer, not the allocation's instruction tail.
+    out.requires_captured_indirect_table = std::any_of(
+        native.begin(), native.end(), [](const Instruction& instruction) {
+            const u32 opcode = instruction.Bits(0, 12);
+            return opcode == 0x949 || opcode == 0x958;
+        });
     std::vector<u64> words(10, 0);
     if (graphics) {
         std::memcpy(words.data(), program.data(), 80);
@@ -181,6 +187,9 @@ std::optional<ComputeControl> ReadComputeControl(std::span<const u8> control) {
 
 std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& control,
                              ComputeKey& key) {
+    if (lowered.requires_captured_indirect_table) {
+        throw std::invalid_argument("Warm program requires a captured indirect branch table");
+    }
     if (lowered.code.size() < 8 || lowered.code.size() % 8 != 0) {
         throw std::invalid_argument("Compute warm record requires complete lowered code words");
     }
@@ -205,6 +214,9 @@ std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& c
 }
 
 std::vector<u8> GraphicsEnv(u32 stage, const LoweredCode& lowered, std::span<const u8> program) {
+    if (lowered.requires_captured_indirect_table) {
+        throw std::invalid_argument("Warm program requires a captured indirect branch table");
+    }
     if ((stage != 0 && stage != 4) || program.size() < 80 || lowered.code.size() < 8 ||
         lowered.code.size() % 8 != 0) {
         throw std::invalid_argument("Invalid graphics warm record stage, header or code size");
@@ -212,7 +224,7 @@ std::vector<u8> GraphicsEnv(u32 stage, const LoweredCode& lowered, std::span<con
     const auto sph = program.first(80);
     const u32 bound = lowered.texture_buffer != ~0U ? lowered.texture_buffer
                                                      : (stage == 0 ? 0U : 2U);
-    // Constant buffer bank 1 = the last 256 bytes of the program allocation.
+    // Legacy guess for ordinary constants; never use it as an indirect branch table.
     const auto bank1 = program.last(std::min<size_t>(256, program.size()));
     const size_t cbuf_count = (bank1.size() & ~size_t{3}) / 4;
     const u32 w1 = Get<u32>(sph, 4), w2 = Get<u32>(sph, 8), w3 = Get<u32>(sph, 12);
