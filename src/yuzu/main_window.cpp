@@ -2282,7 +2282,8 @@ bool MainWindow::OnShutdownBegin() {
     if (QtCommon::system->IsShuttingDown()) {
         status_bar_update_timer.stop();
         connect(QtCommon::emu_thread.get(), &QThread::finished, this,
-                &MainWindow::OnEmulationStopped, Qt::UniqueConnection);
+                &MainWindow::OnEmulationStopped,
+                static_cast<Qt::ConnectionType>(Qt::QueuedConnection | Qt::UniqueConnection));
         return false;
     }
 
@@ -2301,7 +2302,9 @@ bool MainWindow::OnShutdownBegin() {
     QtCommon::emu_thread->disconnect();
     QtCommon::emu_thread->SetRunning(true);
 
-    connect(QtCommon::emu_thread.get(), &QThread::finished, this, &MainWindow::OnEmulationStopped);
+    // Windows may emit finished from terminate() while holding the thread mutex.
+    connect(QtCommon::emu_thread.get(), &QThread::finished, this, &MainWindow::OnEmulationStopped,
+            Qt::QueuedConnection);
     emit EmulationStopping();
 
     int shutdown_time = 1000;
