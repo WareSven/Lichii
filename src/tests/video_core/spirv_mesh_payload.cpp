@@ -80,10 +80,11 @@ std::vector<u32> Emit(Stage stage, Read read, u32 payload_words) {
                            {{}, IR::AbstractSyntaxNode::Type::Return}};
     IR::IREmitter ir{block};
     if (read != Read::None) {
-        const IR::U32 address = read == Read::Dynamic      ? ir.WorkgroupIdX()
-                                : read == Read::FoldedZero ? ir.IAdd(ir.Imm32(1), ir.Imm32(~0U))
-                                : read == Read::Zero       ? ir.Imm32(0)
-                                                           : ir.Imm32(16);
+        const IR::U32 address = read == Read::Dynamic ? ir.WorkgroupIdX()
+                                : read == Read::FoldedZero
+                                    ? IR::U32{ir.IAdd(ir.Imm32(1), ir.Imm32(~0U))}
+                                : read == Read::Zero ? ir.Imm32(0)
+                                                     : ir.Imm32(16);
         const IR::U32 value{ir.IsbeRead(address)};
         if (read != Read::Dead) {
             ir.IsbeWriteAttribute(ir.Imm32(0), value);
