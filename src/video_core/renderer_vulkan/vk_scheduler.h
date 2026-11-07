@@ -135,6 +135,7 @@ public:
         return render_pass_has_stores;
     }
 
+
     /// A dispatch was recorded: the next render pass must see what it wrote.
     void NoteComputeWrites() {
         compute_writes_pending = true;

@@ -161,6 +161,7 @@ public:
 
     size_t MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const;
 
+    /// Bumped after each page table change: lookups cached under one value stay valid until then.
     [[nodiscard]] u64 MapSerial() const {
         return map_serial.load(std::memory_order_acquire);
     }
@@ -265,7 +266,7 @@ private:
     inline void SetEntry(size_t position, EntryType entry, bool is_big_page);
 
     Common::MultiLevelPageTable<u32> page_table;
-    Common::RangeMap<GPUVAddr, PTEKind> kind_map;
+    mutable Common::RangeMap<GPUVAddr, PTEKind> kind_map;
     Common::SparseLargeVector<u32> big_page_table_dev;
 
     std::vector<u64> big_page_continuous;

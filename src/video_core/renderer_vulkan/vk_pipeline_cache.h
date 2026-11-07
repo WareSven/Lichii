@@ -129,6 +129,10 @@ public:
 
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
 
+    [[nodiscard]] const char* GraphicsMissReason() const noexcept {
+        return graphics_miss;
+    }
+
     void TickFrame();
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline();
@@ -165,7 +169,10 @@ private:
         bool libraries_only = false);
 
     ComputePipelineCacheEntry CreateComputePipeline(const ComputePipelineCacheKey& key,
-                                                     const ShaderInfo* shader);
+                                                     const ShaderInfo* shader,
+                                                     const ComputePipeline* previous = nullptr);
+
+    bool NullPointerSlotFilled(const ComputePipeline& pipeline) const;
 
     ComputePipelineCacheEntry CreateComputePipeline(ShaderPools& pools,
                                                      const ComputePipelineCacheKey& key,
@@ -214,6 +221,7 @@ private:
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};
+    mutable const char* graphics_miss{"no-pipeline"};
 
     /// EDEN_NX2_GPL: shader libraries shared by the graphics pipelines. Declared before the
     /// pipelines, so it outlives them.
@@ -226,6 +234,7 @@ private:
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
 
     ::Common::unordered_map<ComputePipelineCacheKey, ComputePipelineCacheEntry> compute_cache;
+    std::vector<std::unique_ptr<ComputePipeline>> retired_compute_pipelines;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
 
     ShaderPools main_pools;
@@ -237,9 +246,9 @@ private:
 
     std::filesystem::path pipeline_cache_filename;
 
-    /// Key hashes of the graphics pipelines in the disk cache. Only those a recent session used
-    /// (used_pipelines) are built at boot; the rest are built when first needed, and not stored
-    /// again. Each built pipeline holds driver memory (title 1: 6.5k cached, a quarter used).
+    /// Key hashes of the graphics pipelines in the disk cache. Switch 2 preloads all recorded
+    /// pipelines; other titles use recent-session ages unless preload-all is enabled. Deferred
+    /// keys are not stored again. Each built pipeline holds driver memory.
     std::unordered_set<u64> disk_pipelines;
     std::unordered_map<u64, u8> used_pipelines; ///< Key hash -> sessions since it was last used
     std::unordered_set<const GraphicsPipeline*> used_this_session;

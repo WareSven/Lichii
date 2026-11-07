@@ -77,10 +77,17 @@ public:
     /// @brief Flushes delayed removal operations
     void SyncGuestHost();
 
-    /// Drops the native programs the debug server rejects so their next draw or dispatch lowers
-    /// them again (and fails); after an un-reject, forgets every rejection so they are retried.
-    /// Runs on the thread that owns the cache, between frames.
+    /// Drops the cached native programs the debug server rejects (docs/nx2/debug-mcp.md); after
+    /// an un-reject also every remembered rejection. Rasterizer thread, between frames.
     void RefreshDebugRejections(bool unrejected);
+
+    /// Native program keys of the graphics stages bound by the last RefreshStages (0 where a
+    /// stage is off or not a native program), for the frame dump.
+    [[nodiscard]] std::array<u64, NUM_PROGRAMS> GraphicsNativeKeys(
+        const std::array<u64, NUM_PROGRAMS>& unique_hashes) const;
+
+    /// Native program key of the bound compute program, 0 when unknown, for the frame dump.
+    [[nodiscard]] u64 ComputeNativeKey();
 
 protected:
     struct GraphicsEnvironments {

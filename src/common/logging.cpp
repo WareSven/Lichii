@@ -31,6 +31,7 @@
 #include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
 #include "common/literals.h"
+#include "common/log_ring.h"
 #include "common/polyfill_thread.h"
 #include "common/thread.h"
 

@@ -42,7 +42,6 @@
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/kepler_compute.h"
-#include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_download_trace.h"
 #include "video_core/surface.h"
@@ -318,6 +317,18 @@ public:
                                                           ObtainBufferOperation post_op);
     void FlushCachedWrites();
 
+    /// Where the CPU writes into GPU-written memory that were collected but not applied yet
+    /// (WriteMemory) come from: downloads must not write the GPU's older copy over them.
+    using PendingCpuWrites = std::function<void(const std::function<void(DAddr, size_t)>&)>;
+    void SetPendingCpuWrites(PendingCpuWrites source) {
+        pending_cpu_writes = std::move(source);
+    }
+
+    /// Takes CPU writes about to be applied one by one out of the GPU-written ranges first, so
+    /// applying one doesn't download the GPU's copy over another (WriteMemory keeps the GPU data
+    /// on the pages it writes).
+    void ClaimCpuWrites(std::span<const std::pair<DAddr, u64>> ranges);
+
     /// Return true when there are uncommitted buffers to be downloaded
     [[nodiscard]] bool HasUncommittedFlushes() const noexcept;
 
@@ -368,8 +379,8 @@ public:
     [[nodiscard]] bool IsRegionGpuModified(DAddr addr, size_t size);
 
     /// Visits the uniform and storage buffers bound for the last draw or dispatch with the cached
-    /// host buffer holding each range, if one does, for diagnostics. Nothing is
-    /// created or synchronized. Stage 5 is compute.
+    /// host buffer holding each range, if one does, for the frame dump. Nothing is created or
+    /// synchronized. Stage 5 is compute.
     template <typename Func>
     void ForEachBoundBuffer(bool compute, Func&& func) {
         const auto visit = [&](u32 stage, bool storage, u32 index, bool written,
@@ -379,7 +390,8 @@ public:
             }
             const Buffer* host = nullptr;
             u32 offset = 0;
-            if (const BufferId id = page_table[binding.device_addr >> CACHING_PAGEBITS]) {
+            const u64 page = binding.device_addr >> CACHING_PAGEBITS;
+            if (const BufferId id = page < page_table.size() ? page_table[page] : BufferId{}) {
                 const Buffer& buffer = slot_buffers[id];
                 if (buffer.IsInBounds(binding.device_addr, size)) {
                     host = &buffer;
@@ -393,12 +405,13 @@ public:
             ForEachEnabledBit(channel_state->enabled_compute_uniform_buffer_mask, [&](u32 index) {
                 const Binding& binding = channel_state->compute_uniform_buffers[index];
                 visit(5, false, index, false, binding,
-                      sizes ? std::min(binding.size, (*sizes)[index]) : binding.size);
+                      sizes ? (std::min)(binding.size, (*sizes)[index]) : binding.size);
             });
             ForEachEnabledBit(channel_state->enabled_compute_storage_buffers, [&](u32 index) {
                 const Binding& binding = channel_state->compute_storage_buffers[index];
-                visit(5, true, index, ((channel_state->written_compute_storage_buffers >> index) & 1) != 0,
-                      binding, binding.size);
+                visit(5, true, index,
+                      ((channel_state->written_compute_storage_buffers >> index) & 1) != 0, binding,
+                      binding.size);
             });
             return;
         }
@@ -407,7 +420,7 @@ public:
             ForEachEnabledBit(channel_state->enabled_uniform_buffer_masks[stage], [&](u32 index) {
                 const Binding& binding = channel_state->uniform_buffers[stage][index];
                 visit(stage, false, index, false, binding,
-                      sizes ? std::min(binding.size, (*sizes)[stage][index]) : binding.size);
+                      sizes ? (std::min)(binding.size, (*sizes)[stage][index]) : binding.size);
             });
             ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
                 const Binding& binding = channel_state->storage_buffers[stage][index];
@@ -611,6 +624,13 @@ private:
     /// Re-dirties repacked vertex buffers whose source data was written since they were bound.
     void RefreshRepackedVertexBuffers();
 
+    /// CPU writes collected but not yet applied (SetPendingCpuWrites).
+    [[nodiscard]] Common::RangeSet<DAddr> PendingCpuWriteRanges();
+
+    /// Writes downloaded bytes to guest memory, except over `cpu_written`.
+    void WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_written, DAddr device_addr,
+                               const u8* data, u64 size);
+
     void InlineMemoryImplementation(DAddr dest_address, size_t copy_size,
                                     std::span<const u8> inlined_buffer);
 
@@ -663,38 +683,53 @@ private:
         return AsyncBufferDownloads() || memory_tracker.IsRegionPreflushable(device_addr, size);
     }
 
-    /// Queues a GPU write for download at the next fence where DownloadsAtFence holds. With only
-    /// Preflushable marks, just the marked pages are queued: a write that covers one marked page
-    /// of a large buffer would otherwise copy the whole buffer back at every fence.
-    void QueueFenceDownload(DAddr device_addr, u64 size) {
-        static const bool exact = [] {
-            const char* value = std::getenv("EDEN_NX2_EXACT_PREFLUSH");
-            return value == nullptr || value[0] != '0';
-        }();
+    /// Whether the range holds GPU-written data that no fence downloads (not Preflushable).
+    bool HasGpuWritesNotDownloadedAtFence(DAddr device_addr, u64 size) {
+        if (AsyncBufferDownloads()) {
+            return false;
+        }
+        bool found = false;
+        memory_tracker.ForEachDownloadRange(device_addr, size, false, [&](u64 start, u64 range_size) {
+            if (found) {
+                return;
+            }
+            u64 covered = 0;
+            memory_tracker.ForEachPreflushableRange(start, range_size, [&](u64 lower, u64 length) {
+                const u64 begin = (std::max)(lower, start);
+                const u64 end = (std::min)(lower + length, start + range_size);
+                covered += end > begin ? end - begin : 0;
+            });
+            found = covered < range_size;
+        });
+        return found;
+    }
+
+    /// A GPU write: queues its Preflushable parts for download at the next fence and traps reads
+    /// of the rest. Queuing the whole range when any page of it was Preflushable copied whole
+    /// written storage buffers (up to 8 MiB) back at every fence: ~5 GB/s in title 1's forest.
+    void QueueGpuWrite(DAddr device_addr, u64 size) {
         if (AsyncBufferDownloads()) {
             uncommitted_gpu_modified_ranges.Add(device_addr, size);
             return;
         }
-        if (!exact) {
-            if (memory_tracker.IsRegionPreflushable(device_addr, size)) {
-                uncommitted_gpu_modified_ranges.Add(device_addr, size);
-            } else {
-                ArmReadTraps(device_addr, size);
-            }
-            return;
-        }
         const DAddr end = device_addr + size;
+        DAddr cursor = device_addr;
         u64 queued = 0;
-        memory_tracker.ForEachPreflushableRange(device_addr, size, [&](DAddr begin, u64 length) {
-            const DAddr lower = (std::max)(begin, device_addr);
-            const DAddr upper = (std::min)(begin + length, end);
-            if (lower < upper) {
-                uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
-                queued += upper - lower;
+        memory_tracker.ForEachPreflushableRange(device_addr, size, [&](DAddr start, u64 range_size) {
+            const DAddr lower = (std::max)(start, cursor);
+            const DAddr upper = (std::min)(start + range_size, end);
+            if (lower >= upper) {
+                return;
             }
+            if (lower > cursor) {
+                ArmReadTraps(cursor, lower - cursor);
+            }
+            uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
+            queued += upper - lower;
+            cursor = upper;
         });
-        if (queued < size) {
-            ArmReadTraps(device_addr, size);
+        if (cursor < end) {
+            ArmReadTraps(cursor, end - cursor);
         }
         if (Nx2DownloadTrace::g_enabled && queued != 0) [[unlikely]] {
             Nx2DownloadTrace::Queued(device_addr, size, queued);
@@ -727,6 +762,7 @@ private:
     /// fence pops. A write to a range after a download was taken removes it from that download
     /// (and every other pending one): its bytes are older than the write.
     std::deque<Common::RangeSet<DAddr>> pending_download_ranges;
+    PendingCpuWrites pending_cpu_writes;
     std::optional<Async_Buffer> current_buffer;
 
     std::deque<Async_Buffer> async_buffers_death_ring;

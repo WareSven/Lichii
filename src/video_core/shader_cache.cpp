@@ -96,6 +96,26 @@ void ShaderCache::RefreshDebugRejections(bool unrejected) {
              unrejected ? ", earlier rejections forgotten" : "");
 }
 
+std::array<u64, 6> ShaderCache::GraphicsNativeKeys(
+    const std::array<u64, NUM_PROGRAMS>& unique_hashes) const {
+    std::array<u64, NUM_PROGRAMS> keys{};
+    for (size_t index = 0; index < NUM_PROGRAMS; ++index) {
+        const ShaderInfo* const info = shader_infos[index];
+        if (unique_hashes[index] != 0 && info && info->lowered_native) {
+            keys[index] = info->lowered_native->native_program_key;
+        }
+    }
+    return keys;
+}
+
+u64 ShaderCache::ComputeNativeKey() {
+    const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
+    const GPUVAddr shader_addr{program_base + kepler_compute->launch_description.program_start};
+    const std::optional<VAddr> cpu_shader_addr{gpu_memory->GpuToCpuAddress(shader_addr)};
+    const ShaderInfo* const info{cpu_shader_addr ? TryGet(*cpu_shader_addr) : nullptr};
+    return info && info->lowered_native ? info->lowered_native->native_program_key : 0;
+}
+
 ShaderCache::ShaderCache(Tegra::MaxwellDeviceMemoryManager& device_memory_)
     : device_memory{device_memory_} {}
 

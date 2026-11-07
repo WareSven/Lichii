@@ -40,7 +40,8 @@ bool DmaPusher::IsMemoryWriter(const Engines::EngineInterface& engine, Engines::
         return static_cast<const Engines::KeplerCompute&>(engine).MayWriteMemory(method);
     }
     if (type == Engines::EngineTypes::MaxwellDMA) {
-        return method >= MacroRegistersStart || engine.execution_mask[method];
+        return method >= MacroRegistersStart ||
+               (method < engine.execution_mask.size() && engine.execution_mask[method]);
     }
     return false;
 }
@@ -275,6 +276,8 @@ bool DmaPusher::Step() {
     }
 
     if (signal_sync) {
+        // SignalFence invalidates the GPU caches, which can record copies into the scheduler: the
+        // back's state, which a drained back still submits from in its idle hook.
         VideoCommon::GpuSplit::Get().Run([this] {
             rasterizer->SignalFence([this]() {
                 std::scoped_lock lk(sync_mutex);
@@ -529,8 +532,15 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
             return;
         }
         const auto engine_type = subchannel_type[dma_state.subchannel];
-        const bool writer = split.Active() &&
-                            IsMemoryWriter(*subchannel, engine_type, dma_state.method);
+        const bool writer = split.Active() && [&] {
+            const u32 count = dma_state.non_incrementing ? 1 : num_methods;
+            for (u32 index = 0; index < count; ++index) {
+                if (IsMemoryWriter(*subchannel, engine_type, dma_state.method + index)) {
+                    return true;
+                }
+            }
+            return false;
+        }();
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();

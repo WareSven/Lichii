@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """MCP server (stdio) for Lichii's in-process debug server (docs/nx2/debug-mcp.md).
 
-Run Lichii with EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545, then register this script as a stdio MCP
-server for the agent:  python3 -I tools/nx2/debug_mcp.py [--server 127.0.0.1:6545]
+Run lichii.exe or eden-cli.exe with EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545, then register this
+script as a stdio MCP server for the agent:  py -I tools/nx2/debug_mcp.py [--server 127.0.0.1:6545]
 or run one request from a shell:
-  python3 -I tools/nx2/debug_mcp.py --call '{"method":"screenshot","params":{}}' --out shot.png
+  py -I tools/nx2/debug_mcp.py --call '{"method":"screenshot","params":{}}' --out shot.png
 
 Standard library only. Each tool call is forwarded as one JSON line to the emulator, which may
 be restarted between calls: the adapter reconnects on demand.
@@ -172,6 +172,23 @@ TOOLS = [
                 "budget_ms": {"type": "integer", "minimum": 1, "maximum": 10000},
             },
             "required": ["pattern"],
+        },
+    },
+    {
+        "name": "write_memory",
+        "description": "For experiments only: writes 1 to 4096 bytes of the game's guest memory "
+                       "and returns what was there before. Refused unless the emulator was "
+                       "started with EDEN_NX2_DEBUG_WRITE=1 (status shows write_memory). Give "
+                       "'hex' (byte pairs in memory order) or 'f32' (floats, little endian). "
+                       "Restore the 'before' bytes when done.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": ["string", "integer"]},
+                "hex": {"type": "string"},
+                "f32": {"type": "array", "items": {"type": "number"}},
+            },
+            "required": ["address"],
         },
     },
     {
@@ -427,8 +444,11 @@ def call_once(adapter, request_text, out, stdout):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--server", default=os.environ.get("LICHII_DEBUG_SERVER", DEFAULT_SERVER),
-                        help=f"host:port of EDEN_NX2_DEBUG_SERVER (default {DEFAULT_SERVER})")
+    parser.add_argument("--server",
+                        default=os.environ.get("EDEN_NX2_DEBUG_SERVER",
+                                               os.environ.get("LICHII_DEBUG_SERVER", DEFAULT_SERVER)),
+                        help="host:port of EDEN_NX2_DEBUG_SERVER (default: that variable, then LICHII_DEBUG_SERVER, else "
+                             f"{DEFAULT_SERVER})")
     parser.add_argument("--call", metavar="JSON",
                         help='run one request and exit, e.g. \'{"method":"screenshot","params":{}}\'')
     parser.add_argument("--out", metavar="PNG", help="with --call: where to save the PNG")

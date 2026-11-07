@@ -1812,8 +1812,8 @@ NpadButtonState EmulatedController::GetNpadButtons() const {
         return state;
     }
     state.raw |= injected->buttons;
-    const auto directions = [&state](const AnalogStickState& stick, NpadButton left,
-                                     NpadButton up, NpadButton right, NpadButton down) {
+    const auto directions = [&state](const AnalogStickState& stick, NpadButton left, NpadButton up,
+                                     NpadButton right, NpadButton down) {
         constexpr s32 threshold = HID_JOYSTICK_MAX / 2;
         state.raw &= ~(left | up | right | down);
         state.raw |= stick.x < -threshold ? left : NpadButton::None;
